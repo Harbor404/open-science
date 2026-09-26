@@ -13,7 +13,7 @@ jobs:
   arm64:
     name: Native Windows ARM64 probe
     runs-on: windows-11-arm
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -160,6 +160,28 @@ jobs:
           & $env:OPEN_SCIENCE_RSCRIPT --vanilla -e "library(jsonlite); cat('jsonlite=', as.character(packageVersion('jsonlite')), '\n', sep='')"
           if ($LASTEXITCODE -ne 0) { throw 'jsonlite ARM64 load failed' }
           "R jsonlite: source build and load passed" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Build R runtime package floor from source
+        shell: pwsh
+        run: |
+          $packages = @(
+            'ggplot2', 'renv', 'MASS', 'circlize', 'dplyr', 'ggrepel', 'ggVennDiagram',
+            'magrittr', 'openxlsx', 'patchwork', 'ragg', 'RColorBrewer', 'readxl', 'scales',
+            'showtext', 'sysfonts', 'systemfonts', 'tidyr', 'venn', 'VennDiagram'
+          )
+          $packageVector = ($packages | ForEach-Object { "'$_'" }) -join ', '
+          $script = @"
+          options(pkgType = 'source', repos = c(CRAN = 'https://cloud.r-project.org'))
+          install.packages(c($packageVector), lib = Sys.getenv('R_LIBS_USER'), type = 'source', dependencies = c('Depends', 'Imports', 'LinkingTo'), Ncpus = 2)
+          for (package in c($packageVector)) {
+            loadNamespace(package)
+            cat(package, '=', as.character(packageVersion(package)), '\n', sep = '')
+          }
+          "@
+          $output = (& $env:OPEN_SCIENCE_RSCRIPT --vanilla -e $script 2>&1 | Out-String)
+          $output
+          if ($LASTEXITCODE -ne 0) { throw "R ARM64 package floor source build failed: $output" }
+          'R package floor: source build and load passed' >> $env:GITHUB_STEP_SUMMARY
 
       - name: Execute R Notebook loop on ARM64
         shell: pwsh
