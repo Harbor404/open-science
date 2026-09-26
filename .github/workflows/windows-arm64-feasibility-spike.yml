@@ -309,3 +309,14 @@ jobs:
         run: |
           rustup target add aarch64-pc-windows-msvc
           cargo check --locked --target aarch64-pc-windows-msvc --manifest-path packages/notebook-network-sandbox/vendor/windows-src/Cargo.toml
+
+      - name: Build ARM64 AppContainer host
+        shell: pwsh
+        run: node packages/notebook-network-sandbox/vendor/windows/build.mjs arm64
+
+      - name: Run ARM64 AppContainer smoke
+        shell: pwsh
+        run: >-
+          packages/notebook-network-sandbox/vendor/windows-src/ci/smoke.ps1
+          -Exe packages/notebook-network-sandbox/vendor/windows/arm64/notebook-appcontainer-host.exe
+          -Mode Basic
