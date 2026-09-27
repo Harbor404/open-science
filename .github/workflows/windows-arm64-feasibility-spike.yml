@@ -88,14 +88,20 @@ jobs:
       - name: Probe Prisma x64 binary fallback under ARM64 emulation
         shell: pwsh
         run: |
+          $probeSchema = Join-Path $PWD 'prisma/arm64-binary-probe.prisma'
+          $schemaText = Get-Content (Join-Path $PWD 'prisma/schema.prisma') -Raw
+          $schemaText = $schemaText -replace '(provider = "prisma-client-js"\r?\n)', '$1  engineType = "binary"`r`n'
+          [IO.File]::WriteAllText($probeSchema, $schemaText, [Text.UTF8Encoding]::new($false))
           $env:PRISMA_CLI_QUERY_ENGINE_TYPE = 'binary'
-          $generateOutput = (& npx prisma generate 2>&1 | Out-String)
+          $generateOutput = (& npx prisma generate --schema $probeSchema 2>&1 | Out-String)
           $generateExitCode = $LASTEXITCODE
           Remove-Item Env:PRISMA_CLI_QUERY_ENGINE_TYPE -ErrorAction SilentlyContinue
+          Remove-Item $probeSchema -Force -ErrorAction SilentlyContinue
           $generateOutput
           $global:LASTEXITCODE = 0
           if ($generateExitCode -ne 0) {
             'Prisma binary fallback: binary engine generation unavailable (expected limitation)' >> $env:GITHUB_STEP_SUMMARY
+            npx prisma generate --schema prisma/schema.prisma | Out-Null
             return
           }
 
@@ -143,6 +149,7 @@ jobs:
           } else {
             'Prisma binary fallback: x64 engine could not execute under ARM64 emulation (expected limitation)' >> $env:GITHUB_STEP_SUMMARY
           }
+          npx prisma generate --schema prisma/schema.prisma | Out-Null
 
       - name: Probe Electron ARM64 artifact
         shell: pwsh
