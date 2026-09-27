@@ -90,7 +90,7 @@ jobs:
         run: |
           $probeSchema = Join-Path $PWD 'prisma/arm64-binary-probe.prisma'
           $schemaText = Get-Content (Join-Path $PWD 'prisma/schema.prisma') -Raw
-          $schemaText = $schemaText -replace '(provider = "prisma-client-js"\r?\n)', '$1  engineType = "binary"`r`n'
+          $schemaText = $schemaText -replace '(generator client \{\r?\n)', ('$1  engineType = "binary"' + [Environment]::NewLine)
           [IO.File]::WriteAllText($probeSchema, $schemaText, [Text.UTF8Encoding]::new($false))
           $env:PRISMA_CLI_QUERY_ENGINE_TYPE = 'binary'
           $generateOutput = (& npx prisma generate --schema $probeSchema 2>&1 | Out-String)
