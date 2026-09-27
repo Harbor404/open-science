@@ -85,6 +85,65 @@ jobs:
           }
           $global:LASTEXITCODE = 0
 
+      - name: Probe Prisma x64 binary fallback under ARM64 emulation
+        shell: pwsh
+        run: |
+          $env:PRISMA_CLI_QUERY_ENGINE_TYPE = 'binary'
+          $generateOutput = (& npx prisma generate 2>&1 | Out-String)
+          $generateExitCode = $LASTEXITCODE
+          Remove-Item Env:PRISMA_CLI_QUERY_ENGINE_TYPE -ErrorAction SilentlyContinue
+          $generateOutput
+          $global:LASTEXITCODE = 0
+          if ($generateExitCode -ne 0) {
+            'Prisma binary fallback: binary engine generation unavailable (expected limitation)' >> $env:GITHUB_STEP_SUMMARY
+            return
+          }
+
+          $binaryPath = Get-ChildItem -Path (Join-Path $PWD 'node_modules') -Filter 'query-engine-windows.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $binaryPath) {
+            'Prisma binary fallback: x64 query engine artifact unavailable (expected limitation)' >> $env:GITHUB_STEP_SUMMARY
+            return
+          }
+          $bytes = [IO.File]::ReadAllBytes($binaryPath)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x8664) {
+            throw ("Expected Prisma fallback engine to be x64 PE 0x8664, got 0x{0:x4}" -f $machine)
+          }
+
+          $dbPath = (Join-Path $env:RUNNER_TEMP 'prisma-binary-arm64.db').Replace('\', '/')
+          $env:OPEN_SCIENCE_PRISMA_DB = $dbPath
+          $env:PRISMA_CLIENT_ENGINE_TYPE = 'binary'
+          $probeScript = @'
+          const { PrismaClient } = require('@prisma/client')
+          const client = new PrismaClient({
+            datasources: { db: { url: `file:${process.env.OPEN_SCIENCE_PRISMA_DB}` } }
+          })
+          ;(async () => {
+            try {
+              const rows = await client.$queryRaw`SELECT 1 AS ready`
+              if (String(rows?.[0]?.ready) !== '1') throw new Error(`Unexpected query result: ${String(rows?.[0]?.ready)}`)
+              console.log('Prisma x64 binary fallback query: passed')
+            } finally {
+              await client.$disconnect()
+            }
+          })().catch((error) => {
+            console.error(error)
+            process.exitCode = 1
+          })
+          '@
+          $probeOutput = ($probeScript | node 2>&1 | Out-String)
+          $probeExitCode = $LASTEXITCODE
+          Remove-Item Env:OPEN_SCIENCE_PRISMA_DB -ErrorAction SilentlyContinue
+          Remove-Item Env:PRISMA_CLIENT_ENGINE_TYPE -ErrorAction SilentlyContinue
+          $probeOutput
+          $global:LASTEXITCODE = 0
+          if ($probeExitCode -eq 0) {
+            'Prisma binary fallback: x64 engine executed under Windows ARM64 emulation (compatibility only; not native ARM64)' >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            'Prisma binary fallback: x64 engine could not execute under ARM64 emulation (expected limitation)' >> $env:GITHUB_STEP_SUMMARY
+          }
+
       - name: Probe Electron ARM64 artifact
         shell: pwsh
         run: |
