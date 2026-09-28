@@ -18,6 +18,8 @@ export default defineConfig({
     }
   },
   plugins: [react(), tailwindcss()],
+  // Match Electron: lazy spreadsheet imports require code splitting in module workers.
+  worker: { format: 'es' },
   build: {
     outDir: resolve('out/web'),
     emptyOutDir: true
