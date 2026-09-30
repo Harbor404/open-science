@@ -23,6 +23,10 @@ import {
   type ProcessTreeKillResult
 } from '../process-tree'
 import { resolveWindowsPowerShellExecutable } from '../windows-powershell'
+import {
+  resolveWindowsNotebookRuntime,
+  windowsNotebookRuntimeEnvironment
+} from './windows-notebook-runtime'
 import { NOTEBOOK_SHELL_DEFAULT_TIMEOUT_MS } from '../../shared/notebook'
 import type { ShellRuntimeBinding } from '../../shared/notebook'
 import {
@@ -118,13 +122,17 @@ const buildShellEnv = (
   platform: NodeJS.Platform = process.platform,
   sourceEnv: NodeJS.ProcessEnv = process.env,
   runtimeRoot?: string,
-  workloadCacheEnv?: NodeJS.ProcessEnv
+  workloadCacheEnv?: NodeJS.ProcessEnv,
+  binding: ShellRuntimeBinding = defaultShellRuntimeBinding(platform),
+  workspaceRoot?: string
 ): NodeJS.ProcessEnv => {
   const env = buildNotebookShellEnvironment(handoffDir, platform, sourceEnv)
   if (runtimeRoot) {
     Object.assign(env, workloadCacheEnv ?? notebookWorkloadCacheEnv(runtimeRoot))
   }
-  return env
+  return binding.kind === 'powershell' && binding.version === '7.6'
+    ? windowsNotebookRuntimeEnvironment(env, resolveWindowsNotebookRuntime(), workspaceRoot ?? '')
+    : env
 }
 
 const POWERSHELL_CLIXML_BLOCK = /#< CLIXML\r?\n<Objs\b[\s\S]*?<\/Objs>(?:\r?\n)?/gu
@@ -185,6 +193,8 @@ type ShellInvocation = {
 const encodePowerShellCommand = (command: string): string => {
   const encodedCommand = Buffer.from(command, 'utf8').toString('base64')
   const script = [
+    'try {',
+    'if ($Error.Count -gt 0) { throw $Error[0] }',
     'if ($env:OPEN_SCIENCE_PSMODULEPATH) {',
     '  $env:PSModulePath = $env:OPEN_SCIENCE_PSMODULEPATH',
     // Import the common in-box command modules by absolute path so their first use does not scan
@@ -201,7 +211,6 @@ const encodePowerShellCommand = (command: string): string => {
     '$global:LASTEXITCODE = 0',
     "$ProgressPreference = 'SilentlyContinue'",
     "$ErrorActionPreference = 'Stop'",
-    'try {',
     '$openScienceCommandText = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($openScienceCommandBase64))',
     '$openScienceCommand = [ScriptBlock]::Create($openScienceCommandText)',
     '& $openScienceCommand',
@@ -227,7 +236,10 @@ const resolveShellInvocation = (
   const binding = typeof runtime === 'string' ? defaultShellRuntimeBinding(runtime) : runtime
   return binding.kind === 'powershell'
     ? {
-        executable: resolveWindowsPowerShellExecutable(),
+        executable:
+          binding.version === '7.6'
+            ? resolveWindowsNotebookRuntime().powershell
+            : resolveWindowsPowerShellExecutable(),
         args: [
           '-NoLogo',
           '-NoProfile',
@@ -357,13 +369,19 @@ const prepareShellLaunchOptions = async (
           runtimePlatform,
           process.env,
           options.runtimeRoot,
-          workloadCacheEnv
+          workloadCacheEnv,
+          runtimeBinding,
+          options.cwd
         )
     // Resolve host npm before injecting the workload-writable global bin into PATH.
     if (options.processSandbox && runtimeBinding.kind === 'native-posix') {
       npmReadRoots = shellNpmReadRoots(shellEnv, runtimePlatform)
     }
-    shellEnv = prepareShellNpmEnvironment(options.runtimeRoot, runtimePlatform, shellEnv)
+    // The bundled Windows environment already freezes its workspace-owned npm prefix.
+    // Preserve it across cells instead of replacing it with another runtime's shared storage.
+    if (runtimeBinding.kind !== 'powershell' || runtimeBinding.version !== '7.6') {
+      shellEnv = prepareShellNpmEnvironment(options.runtimeRoot, runtimePlatform, shellEnv)
+    }
     if (options.inputRoot) shellEnv.OPEN_SCIENCE_INPUT_DIR = options.inputRoot
     else delete shellEnv.OPEN_SCIENCE_INPUT_DIR
   } catch (error) {
@@ -413,6 +431,9 @@ const prepareShellLaunchOptions = async (
           filesystem: {
             readOnlyRoots: [
               options.runtimeRoot,
+              ...(runtimeBinding.kind === 'powershell' && runtimeBinding.version === '7.6'
+                ? [dirname(resolveWindowsNotebookRuntime().node)]
+                : []),
               ...(options.inputRoot ? [options.inputRoot] : []),
               ...(runtimeBinding.kind === 'wsl2-bash'
                 ? []

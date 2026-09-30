@@ -1,6 +1,10 @@
 import { createLogger } from '../logger'
 import { prepareReplCellBindings, type ReplCellBindings } from './repl-cell-bindings'
 import {
+  resolveWindowsNotebookRuntime,
+  windowsNotebookRuntimeEnvironment
+} from './windows-notebook-runtime'
+import {
   NotebookExecutionStopError,
   markNotebookKernelExitCleanedUp,
   NotebookKernelExitError,
@@ -1079,7 +1083,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
     let loopPath: string
     if (kind === 'repl') {
       // Run the control-plane loop as plain Node via the app binary (ELECTRON_RUN_AS_NODE set in env).
-      command = process.execPath
+      command = this.platform === 'win32' ? resolveWindowsNotebookRuntime().node : process.execPath
       loopPath = this.replLoopPath
       // Node otherwise realpaths the main module before loading it. A Windows AppContainer can read
       // the explicitly granted script but cannot enumerate its drive root or unrelated ancestors.
@@ -1490,6 +1494,13 @@ class NotebookKernelExecutor implements NotebookExecutor {
           platform: this.platform,
           sourceEnv: env
         })
+      )
+    }
+    if (kind === 'repl' && this.platform === 'win32') {
+      return windowsNotebookRuntimeEnvironment(
+        env,
+        resolveWindowsNotebookRuntime(),
+        request.dataRoot
       )
     }
     return kind === 'r' ? normalizeRProcessLocale(env, this.platform) : env

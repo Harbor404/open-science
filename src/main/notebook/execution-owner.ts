@@ -1437,7 +1437,9 @@ class NotebookExecutionOwner {
       shellRuntimePlatform(runtimeBinding, platform),
       process.env,
       runtimeRoot,
-      prepareNotebookWorkloadCache(runtimeRoot)
+      prepareNotebookWorkloadCache(runtimeRoot),
+      runtimeBinding,
+      session.dataRoot
     )
     const frozenShellContext: NonNullable<NotebookRunRecord['frozenShellContext']> = {
       cwd: session.cwd,

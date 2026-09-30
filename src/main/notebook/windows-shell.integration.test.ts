@@ -826,7 +826,7 @@ ${ending === 'exit' ? '' : 'setInterval(() => {}, 1000);'}
   )
 
   it(
-    'preserves UTF-8 output with only standard machine module paths',
+    'preserves UTF-8 output with only bundled PowerShell module paths',
     async () => {
       const result = await runPowerShell(`
 Write-Output "分析完成"
@@ -836,15 +836,15 @@ Write-Output "__OPEN_SCIENCE_INTERNAL__=[$env:OPEN_SCIENCE_PSMODULEPATH]"
 
       expect(result).toMatchObject({ exitCode: 0 })
       expect(result.stdout).toContain('分析完成')
-      const programFiles = process.env.ProgramFiles
-      const windowsRoot = process.env.SystemRoot ?? process.env.WINDIR
-      expect(programFiles).toBeTruthy()
-      expect(windowsRoot).toBeTruthy()
-      if (!programFiles || !windowsRoot) throw new Error('Missing standard Windows path variables.')
+      const bundledModules = join(
+        process.cwd(),
+        'packages/notebook-network-sandbox/vendor/windows-runtime',
+        process.arch,
+        'powershell/Modules'
+      )
       const modulePath = result.stdout.match(/^__OPEN_SCIENCE_PSMODULEPATH__=(.*)$/mu)?.[1]?.trim()
       expect(modulePath?.split(';').map((entry) => entry.toLowerCase())).toEqual([
-        `${programFiles}\\WindowsPowerShell\\Modules`.toLowerCase(),
-        `${windowsRoot}\\System32\\WindowsPowerShell\\v1.0\\Modules`.toLowerCase()
+        bundledModules.toLowerCase()
       ])
       expect(result.stdout).toContain('__OPEN_SCIENCE_INTERNAL__=[]')
     },
