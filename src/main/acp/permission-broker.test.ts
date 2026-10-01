@@ -29,6 +29,16 @@ import type { SessionPermissionRuntimeContext } from '../../shared/session-persi
 
 type EmittedPermissionRequest = Parameters<ConstructorParameters<typeof AcpPermissionBroker>[0]>[0]
 
+const permissionRoutes: PermissionPolicyContext[] = [
+  { profile: 'ask', frameworkId: 'claude-code', modelRoute: 'claude-anthropic' },
+  { profile: 'ask', frameworkId: 'opencode', modelRoute: 'opencode-anthropic' },
+  { profile: 'ask', frameworkId: 'opencode', modelRoute: 'opencode-openai' },
+  { profile: 'ask', frameworkId: 'codebuddy', modelRoute: 'codebuddy-openai' },
+  { profile: 'ask', frameworkId: 'codex', modelRoute: 'codex-responses' },
+  { profile: 'ask', frameworkId: 'codex', modelRoute: 'codex-responses-compatibility' },
+  { profile: 'ask', frameworkId: 'codex', modelRoute: 'codex-bridge' }
+]
+
 const getSessionOptionId = (request: EmittedPermissionRequest): string => {
   const optionId = request.options.find((option) => option.scope === 'session')?.optionId
 
@@ -2788,6 +2798,165 @@ describe('ACP permission broker', () => {
   })
 })
 
+it('reuses registered file grants for provider metadata aliases on every framework route', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'permission-file-aliases-'))
+  const client = createProjectDbClient(root)
+  const emit = vi.fn()
+  let broker: AcpPermissionBroker | undefined
+  try {
+    await migrateApplicationDatabase(client)
+    const registry = await createPermissionGrantRegistry({ getClient: async () => client })
+    broker = new AcpPermissionBroker(emit, undefined, registry)
+    for (const operation of ['read', 'write', 'edit', 'notebook_edit', 'delete', 'move']) {
+      await registry.remember({
+        capability: { kind: 'file_operation', key: `file:${operation}` },
+        scope: { kind: 'global' }
+      })
+    }
+    for (const context of permissionRoutes) {
+      for (const name of [
+        'Read',
+        'read',
+        'Write',
+        'write',
+        'Edit',
+        'edit',
+        'MultiEdit',
+        'multiedit',
+        'NotebookEdit',
+        'notebookedit',
+        'delete',
+        'move'
+      ]) {
+        const request = createToolPermissionRequest({ providerToolName: name })
+        request.toolCall._meta = { toolName: name }
+        await expect(broker.requestPermission(request, context)).resolves.toEqual({
+          outcome: { outcome: 'selected', optionId: 'allow-once' }
+        })
+      }
+    }
+    expect(emit).not.toHaveBeenCalled()
+    // Neither display names nor a separate provider directory guard inherit a file grant.
+    for (const request of [
+      createToolPermissionRequest({ title: 'write' }),
+      createToolPermissionRequest({
+        providerToolName: 'external_directory',
+        kind: 'other',
+        locations: [{ path: '/private/path' }]
+      }),
+      createToolPermissionRequest({ providerToolName: 'mcp__custom__write', kind: 'edit' })
+    ]) {
+      const pending = broker.requestPermission(request, {
+        profile: 'ask',
+        frameworkId: 'opencode',
+        mcpServerNames: ['custom']
+      })
+      await vi.waitFor(() => expect(broker!.getPendingRequests()).toHaveLength(1))
+      broker.cancelAllPending()
+      await expect(pending).resolves.toEqual({ outcome: { outcome: 'cancelled' } })
+    }
+  } finally {
+    broker?.cancelAllPending()
+    await client.$disconnect()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('classifies unmapped permissions across tools and framework routes without granting them', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'permission-fallback-reasons-'))
+  initLogger({ logDir: root, mirrorToConsole: false })
+  const registry = { resolve: vi.fn(async () => undefined) } as unknown as PermissionGrantRegistry
+  const broker = new AcpPermissionBroker(vi.fn(), undefined, registry)
+  const lastDecision = async (): Promise<Record<string, unknown>> => {
+    await flushLogs()
+    const events = (await readFile(join(root, 'main.log'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+    return events
+      .filter((event) => event.scope === 'permission' && event.data.stage === 'decision')
+      .at(-1)?.data
+  }
+  const cases = [
+    ['tool_identity_missing', createToolPermissionRequest({ title: 'private-title' })],
+    ['tool_kind_unsupported', createToolPermissionRequest({ kind: 'search' })],
+    ['native_tool_unsupported', createToolPermissionRequest({ providerToolName: 'private-tool' })],
+    ['command_input_unavailable', createToolPermissionRequest({ kind: 'execute' })],
+    [
+      'command_not_rememberable',
+      createToolPermissionRequest({
+        kind: 'execute',
+        rawInput: { command: 'python private-script.py' }
+      })
+    ],
+    [
+      'native_web_unverified',
+      createToolPermissionRequest({ providerToolName: 'WebFetch', kind: 'fetch' })
+    ],
+    [
+      'mcp_identity_unverified',
+      createToolPermissionRequest({ title: 'mcp__private-server__private-tool' })
+    ],
+    [
+      'capability_not_registered',
+      createToolPermissionRequest({ providerToolName: 'mcp__open-science-notebook__private-tool' })
+    ],
+    [
+      'execution_runtime_unresolved',
+      createToolPermissionRequest({ providerToolName: 'mcp__open-science-notebook__bash_execute' })
+    ]
+  ] as const
+  try {
+    for (const context of permissionRoutes) {
+      for (const [reason, request] of cases) {
+        const pending = broker.requestPermission(request, {
+          ...context,
+          projectId: 'project-1',
+          mcpServerNames: ['open-science-notebook'],
+          notebookShellRuntimeQualifier: 'private-unsupported-runtime'
+        })
+        const [prompt] = broker.getPendingRequests()
+        expect(
+          prompt.options
+            .filter((option) => option.kind.startsWith('allow'))
+            .map((option) => option.scope)
+        ).toEqual(['once'])
+        await broker.respond({ requestId: prompt.requestId, optionId: 'reject-once' })
+        await pending
+        expect(await lastDecision()).toMatchObject({
+          frameworkId: context.frameworkId,
+          modelRoute: context.modelRoute,
+          reason,
+          fallback: true,
+          outcome: 'approval_required'
+        })
+      }
+    }
+    expect(registry.resolve).not.toHaveBeenCalled()
+    for (const projectId of [undefined, 'project-1']) {
+      const pending = broker.requestPermission(
+        createToolPermissionRequest({ providerToolName: 'write' }),
+        { profile: 'ask', projectId }
+      )
+      await vi.waitFor(() => expect(broker.getPendingRequests()).toHaveLength(1))
+      expect(await lastDecision()).toMatchObject({
+        reason: projectId ? 'grant_not_matched' : 'project_context_unavailable',
+        fallback: !projectId,
+        hasReportedToolName: true,
+        hasRawInput: false,
+        hasLocations: false
+      })
+      broker.cancelAllPending()
+      await pending
+    }
+    expect(await readFile(join(root, 'main.log'), 'utf8')).not.toContain('private-')
+  } finally {
+    broker.cancelAllPending()
+    await flushLogs()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('records permission fallback, automatic authority and settlement without provider payloads', async () => {
   const root = await mkdtemp(join(tmpdir(), 'permission-decision-log-'))
   initLogger({ logDir: root, mirrorToConsole: false })
@@ -2839,7 +3008,7 @@ it('records permission fallback, automatic authority and settlement without prov
           modelRoute: 'codex-bridge',
           authority: 'human',
           fallback: true,
-          reason: 'capability_unmapped',
+          reason: 'native_tool_unsupported',
           outcome: 'approval_required'
         }),
         expect.objectContaining({

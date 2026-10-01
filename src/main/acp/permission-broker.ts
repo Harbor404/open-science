@@ -156,7 +156,6 @@ const SESSION_ALLOW_OPTION_ID_PREFIX = 'open-science:allow-session:'
 const PROJECT_ALLOW_OPTION_ID_PREFIX = 'open-science:allow-project:'
 const GLOBAL_ALLOW_OPTION_ID_PREFIX = 'open-science:allow-global:'
 const FILE_TOOL_KINDS = new Set(['read', 'edit', 'delete', 'move'])
-const FILE_PROVIDER_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 const NOTEBOOK_SERVER = 'open-science-notebook'
 const NOTEBOOK_EXECUTION_TOOLS = new Set(['notebook_execute', 'repl_execute', 'bash_execute'])
 // Depends on the codex-acp option-ID contract: persistent exec/network policy amendments are the only
@@ -670,13 +669,43 @@ const resolveCategoryKey = (
   if (
     toolCall.locations?.length ||
     (toolCall.kind && FILE_TOOL_KINDS.has(toolCall.kind)) ||
-    (providerToolName && FILE_PROVIDER_TOOLS.has(providerToolName))
+    (providerToolName && capabilityFromLegacyCategory(`file:${providerToolName}`))
   ) {
     const operation = providerToolName ?? toolCall.kind
     return operation ? `file:${operation}` : undefined
   }
 
   return providerToolName ? `tool:${providerToolName}` : undefined
+}
+
+// Explain why a request cannot enter the Registry without treating display text as authority.
+// These fixed diagnostic codes do not introduce new capabilities or remembered grant scopes.
+const unmappedPermissionReason = (
+  params: RequestPermissionRequest,
+  categoryKey: string | undefined,
+  mcpServerNames: readonly string[]
+): string => {
+  if (categoryKey?.startsWith('shell:')) return 'command_not_rememberable'
+  if (categoryKey?.startsWith('tool:')) return 'native_tool_unsupported'
+  if (categoryKey) return 'capability_not_registered'
+
+  const name = extractProviderToolName(params.toolCall)
+  if (isMcpPermission(params, mcpServerNames)) {
+    const identity =
+      resolveTrustedMcpToolIdentity(params, mcpServerNames) ??
+      resolveMcpToolIdentity(name, mcpServerNames)
+    return identity && resolveNotebookExecutionTool(identity)
+      ? 'execution_runtime_unresolved'
+      : 'mcp_identity_unverified'
+  }
+  if (name === 'Bash' || params.toolCall.kind === 'execute')
+    return resolveShellCommand(params) ? 'command_group_unverifiable' : 'command_input_unavailable'
+  if (name === 'WebFetch' || name === 'WebSearch' || params.toolCall.kind === 'fetch')
+    return 'native_web_unverified'
+  if (name) return 'native_tool_unsupported'
+  return !params.toolCall.kind || params.toolCall.kind === 'other'
+    ? 'tool_identity_missing'
+    : 'tool_kind_unsupported'
 }
 
 // Projects an opaque category key into the display grant shown in the composer.
@@ -982,6 +1011,10 @@ class AcpPermissionBroker {
         this.livePermissionProfiles.get(pending.request.sessionId)?.profile.selectedProfile ??
         pending.policyContext?.profile,
       capability: pending.capability,
+      toolKind: pending.request.toolKind,
+      hasReportedToolName: Boolean(pending.request.providerToolName),
+      hasRawInput: pending.request.rawInput != null,
+      hasLocations: Boolean(pending.request.toolLocations?.length),
       ...details
     })
   }
@@ -1438,14 +1471,24 @@ class AcpPermissionBroker {
       stage: 'decision',
       authority: 'human',
       outcome: 'approval_required',
-      fallback: !pending.appOwned && (!pending.capability || !this.permissionGrantRegistry),
+      fallback:
+        !pending.appOwned &&
+        (!pending.capability || !this.permissionGrantRegistry || !pending.projectId),
       reason: pending.appOwned
         ? 'app_owned_approval'
         : !pending.capability
-          ? 'capability_unmapped'
+          ? pending.automaticRequest
+            ? unmappedPermissionReason(
+                pending.automaticRequest,
+                pending.categoryKey,
+                pending.policyContext?.mcpServerNames ?? []
+              )
+            : 'capability_unmapped'
           : !this.permissionGrantRegistry
             ? 'registry_unavailable'
-            : 'grant_not_matched'
+            : !pending.projectId
+              ? 'project_context_unavailable'
+              : 'grant_not_matched'
     })
     let resolveResponse!: (response: RequestPermissionResponse) => void
     let rejectResponse!: (error: unknown) => void

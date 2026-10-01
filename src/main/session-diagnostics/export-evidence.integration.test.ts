@@ -42,7 +42,10 @@ it('preserves an unfamiliar operation failure through real logging, rotation, re
     sessionId: 'session',
     toolCallId: '/opt/private-user/private-tool',
     fallback: true,
-    reason: 'capability_unmapped',
+    reason: 'command_not_rememberable',
+    toolKind: 'execute',
+    hasRawInput: true,
+    hasReportedToolName: false,
     outcome: 'approval_required',
     authority: 'human'
   })
@@ -76,7 +79,10 @@ it('preserves an unfamiliar operation failure through real logging, rotation, re
     'reading-a-new-source',
     'operation-evidence',
     'permission decision trace',
-    'capability_unmapped',
+    'command_not_rememberable',
+    '"toolKind":"execute"',
+    '"hasRawInput":true',
+    '"hasReportedToolName":false',
     'opencode-openai',
     'disk read failed',
     'EIO',

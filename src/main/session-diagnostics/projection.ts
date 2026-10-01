@@ -307,6 +307,18 @@ const permissionLogStates: Record<string, readonly string[]> = {
     'connector_policy'
   ],
   identitySource: ['verified_context', 'provider_metadata', 'tool_kind', 'unavailable'],
+  toolKind: [
+    'read',
+    'edit',
+    'delete',
+    'move',
+    'search',
+    'execute',
+    'think',
+    'fetch',
+    'switch_mode',
+    'other'
+  ],
   matchedScope: ['global', 'project', 'session'],
   capabilityKind: [
     'customize_mutation',
@@ -336,6 +348,7 @@ export function projectDiagnosticLog(
   const diagnostic = fields(data, options)
   if (source.scope === 'permission' && source.msg === 'permission decision trace') {
     for (const [key, allowed] of Object.entries(permissionLogStates)) {
+      delete diagnostic[key]
       if (allowed.includes(data[key] as string)) diagnostic[key] = data[key]
     }
     for (const key of [
@@ -348,7 +361,8 @@ export function projectDiagnosticLog(
       if (typeof data[key] === 'string' && /^[a-f0-9]{16}$/.test(data[key]))
         diagnostic[key] = data[key]
     }
-    if (typeof data.fallback === 'boolean') diagnostic.fallback = data.fallback
+    for (const key of ['fallback', 'hasReportedToolName', 'hasRawInput', 'hasLocations'])
+      if (typeof data[key] === 'boolean') diagnostic[key] = data[key]
     // These closed built-in keys are useful in exports; custom/MCP names remain fingerprinted.
     if (
       typeof data.capabilityKey === 'string' &&

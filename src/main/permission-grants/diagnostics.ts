@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { PermissionCapability, PermissionGrantScope } from '../../shared/permission-grants'
 import type { PermissionProfileId } from '../../shared/permission-profiles'
 import type { AgentFrameworkId } from '../../shared/settings'
+import type { AcpPermissionRequest } from '../../shared/acp'
 import type { AgentModelRoute } from '../agent-framework/types'
 import { createLogger } from '../logger'
 import { isPreRegisteredPermissionIdentity } from './identity-catalog'
@@ -33,15 +34,41 @@ type PermissionDiagnostic = {
   outcome?: 'allowed' | 'approval_required' | 'rejected' | 'cancelled' | 'resolved'
   matchedScope?: PermissionGrantScope['kind']
   waitMs?: number
+  toolKind?: AcpPermissionRequest['toolKind']
+  hasReportedToolName?: boolean
+  hasRawInput?: boolean
+  hasLocations?: boolean
 }
 const fingerprint = (value: string): string =>
   createHash('sha256').update(value).digest('hex').slice(0, 16)
 
 const logPermissionDiagnostic = (event: PermissionDiagnostic): void => {
   try {
-    const { sessionId, toolCallId, requestId, capability, reportedToolName, ...metadata } = event
+    const {
+      sessionId,
+      toolCallId,
+      requestId,
+      capability,
+      reportedToolName,
+      toolKind,
+      ...metadata
+    } = event
     createLogger('permission').info('permission decision trace', {
       ...metadata,
+      ...([
+        'read',
+        'edit',
+        'delete',
+        'move',
+        'search',
+        'execute',
+        'think',
+        'fetch',
+        'switch_mode',
+        'other'
+      ].includes(toolKind ?? '')
+        ? { toolKind }
+        : {}),
       sessionRef: fingerprint(sessionId),
       ...(toolCallId ? { toolCallRef: fingerprint(toolCallId) } : {}),
       ...(requestId ? { requestRef: fingerprint(requestId) } : {}),
