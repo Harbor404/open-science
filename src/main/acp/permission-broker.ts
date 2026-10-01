@@ -1683,6 +1683,15 @@ class AcpPermissionBroker {
       )
 
       return true
+    } catch (error) {
+      this.trace(pending, {
+        stage: 'decision',
+        authority: pending.decisionAuthority,
+        reason: 'permission_settlement_failed',
+        outcome: 'cancelled'
+      })
+      this.settlePending(pending, { outcome: { outcome: 'cancelled' } }, 'cancelled')
+      throw error
     } finally {
       if (this.respondingRequests.get(response.requestId) === pending) {
         this.respondingRequests.delete(response.requestId)

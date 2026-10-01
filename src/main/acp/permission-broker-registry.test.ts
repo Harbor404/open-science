@@ -1858,52 +1858,61 @@ it.each(['claude-code', 'opencode', 'codex', 'codebuddy'] as const)(
   }
 )
 
-it('rechecks an automatic grant after durable settlement and cancels if it was revoked meanwhile', async () => {
-  storageRoot = await mkdtemp(join(tmpdir(), 'permission-revoke-settlement-'))
-  client = createProjectDbClient(storageRoot)
-  await migrateApplicationDatabase(client)
-  const registry = await createPermissionGrantRegistry({ getClient: async () => client! })
-  let finishSettlement!: () => void
-  const settlement = new Promise<void>((resolve) => {
-    finishSettlement = resolve
-  })
-  const settleLive = vi.fn(() => settlement)
-  const emit = vi.fn()
-  const broker = new AcpPermissionBroker(emit, undefined, registry, undefined, {
-    persist: async () => true,
-    settleLive
-  })
-  const unsubscribe = registry.subscribe(() => {
-    void broker.releaseGrantedRequests()
-  })
-  try {
-    const pending = broker.requestPermission(
-      withTrustedMcpToolIdentity(
-        mcpRequest('session-race', 'mcp__open-science-notebook__notebook_state'),
-        'open-science-notebook/notebook_state'
-      ),
-      {
-        profile: 'ask',
-        frameworkId: 'claude-code',
-        projectId: 'project-1',
-        promptMessageId: 'prompt-1',
-        mcpServerNames: ['open-science-notebook']
-      }
-    )
-    await vi.waitFor(() => expect(emit).toHaveBeenCalledOnce())
-    await registry.remember({
-      capability: { kind: 'mcp_tool', key: 'mcp:open-science-notebook/notebook_state' },
-      scope: { kind: 'global' }
+it.each(['revoked', 'lookup_failed'])(
+  'cancels a pending automatic grant after settlement when %s',
+  async (failure) => {
+    storageRoot = await mkdtemp(join(tmpdir(), 'permission-revoke-settlement-'))
+    client = createProjectDbClient(storageRoot)
+    await migrateApplicationDatabase(client)
+    const registry = await createPermissionGrantRegistry({ getClient: async () => client! })
+    const resolveGrant = vi.spyOn(registry, 'resolve')
+    let finishSettlement!: () => void
+    const settlement = new Promise<void>((resolve) => {
+      finishSettlement = resolve
     })
-    await vi.waitFor(() => expect(settleLive).toHaveBeenCalledOnce())
-    const [grant] = await registry.list()
-    await registry.revoke({ grants: [{ id: grant.id, revision: grant.revision }] })
-    finishSettlement()
-    await expect(pending).resolves.toEqual({ outcome: { outcome: 'cancelled' } })
-    expect(broker.getPendingRequests()).toEqual([])
-  } finally {
-    finishSettlement()
-    unsubscribe()
-    broker.cancelAllPending()
+    const settleLive = vi.fn(() => settlement)
+    const emit = vi.fn()
+    const broker = new AcpPermissionBroker(emit, undefined, registry, undefined, {
+      persist: async () => true,
+      settleLive
+    })
+    const unsubscribe = registry.subscribe(() => {
+      void broker.releaseGrantedRequests()
+    })
+    try {
+      const pending = broker.requestPermission(
+        withTrustedMcpToolIdentity(
+          mcpRequest('session-race', 'mcp__open-science-notebook__notebook_state'),
+          'open-science-notebook/notebook_state'
+        ),
+        {
+          profile: 'ask',
+          frameworkId: 'claude-code',
+          projectId: 'project-1',
+          promptMessageId: 'prompt-1',
+          mcpServerNames: ['open-science-notebook']
+        }
+      )
+      await vi.waitFor(() => expect(emit).toHaveBeenCalledOnce())
+      await registry.remember({
+        capability: { kind: 'mcp_tool', key: 'mcp:open-science-notebook/notebook_state' },
+        scope: { kind: 'global' }
+      })
+      await vi.waitFor(() => expect(settleLive).toHaveBeenCalledOnce())
+      if (failure === 'revoked') {
+        const [grant] = await registry.list()
+        await registry.revoke({ grants: [{ id: grant.id, revision: grant.revision }] })
+      } else {
+        resolveGrant.mockRejectedValue(new Error('registry unavailable'))
+      }
+      finishSettlement()
+      await expect(pending).resolves.toEqual({ outcome: { outcome: 'cancelled' } })
+      expect(broker.getPendingRequests()).toEqual([])
+    } finally {
+      finishSettlement()
+      resolveGrant.mockRestore()
+      unsubscribe()
+      broker.cancelAllPending()
+    }
   }
-})
+)
