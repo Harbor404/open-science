@@ -18,6 +18,10 @@ export const captureSessionConversationIntents = (
   runIntent: 'start-run' | 'resume-run' = 'start-run'
 ): void => {
   if (!before || !after || !after.conversationGraph) return
+  // Before runtime adoption, only a Resume intent may be replayed as a command. Other renderer
+  // graph edits still use the first-save projection path and must not become durable authority
+  // merely because they happen while the adoption marker is absent.
+  if (before.runtimeTranscriptOwner !== 'main' && runIntent !== 'resume-run') return
   const previous = before.conversationGraph
   if (!previous) return
   const next = after.conversationGraph

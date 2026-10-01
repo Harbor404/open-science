@@ -178,6 +178,20 @@ const sessionBindingTopologyHash = (session: PersistedChatSession): string => {
   return createHash('sha256').update(JSON.stringify(topology)).digest('hex')
 }
 
+const hasCompletedAgentResponse = (
+  session: PersistedChatSession,
+  promptMessageId: string
+): boolean => {
+  const graph = materializeSessionConversationGraph(session).conversationGraph
+  const messages = graph ? resolveActiveConversationMessages(graph) : session.messages
+  return messages.some(
+    (message) =>
+      message.role === 'agent' &&
+      message.status === 'complete' &&
+      message.responseToMessageId === promptMessageId
+  )
+}
+
 const delegatedSubtreeFrameIds = (graph: PersistedConversationGraph): Set<string> => {
   const result = new Set(
     graph.frames.filter((frame) => frame.kind === 'delegate').map(({ id }) => id)
@@ -1300,24 +1314,42 @@ class SessionPersistenceStateOwner {
         }
       } else if (
         !mainTurnAdmission &&
-        (authority.activeRun || authority.resumeRecovery || authority.runtimeTranscriptLastRun)
+        (authority.resumeRecovery ||
+          authority.runtimeTranscriptLastRun ||
+          (authority.activeRun &&
+            !submittedSession.activeRun &&
+            !hasCompletedAgentResponse(submittedSession, authority.activeRun.promptMessageId)))
       ) {
         // A passive renderer save cannot erase Main's live or recoverable runtime state.
         conversationAuthority = authority
       }
     }
-    // Existing Session state belongs to Main even before runtime transcript adoption. Historical
-    // state remains readable, but later renderer saves cannot replace it. A first save with no
-    // authority still establishes the initial candidate. Only the validated Main turn-admission
-    // path may replace existing state here; this authority is private to renderer save options.
-    const stateAuthority =
-      mainTurnAdmission || !authority ? submittedSession : (conversationAuthority ?? authority)
-    const mainOwnedState = {
-      status: stateAuthority?.status ?? ('idle' as const),
-      error: stateAuthority?.error,
-      errorReportable: stateAuthority?.errorReportable,
-      resumeRecovery: stateAuthority?.resumeRecovery
-    }
+    const permissionOwnedStatus =
+      authority?.runtimeContext?.permission?.state === 'pending'
+        ? 'waiting-permission'
+        : rendererOwnedSession.status === 'waiting-permission'
+          ? (authority?.status ?? 'idle')
+          : undefined
+    const mainOwnedStatus = permissionOwnedStatus
+      ? permissionOwnedStatus
+      : authority?.status === 'waiting-plan-approval' ||
+          rendererOwnedSession.status === 'waiting-plan-approval'
+        ? (authority?.status ?? 'idle')
+        : undefined
+    // When an existing Session has live or recoverable runtime state, its status and recovery
+    // fields remain Main authority even before runtime transcript adoption. The validated Main
+    // turn-admission path is the only pre-adoption writer allowed to replace them.
+    const mainOwnedState =
+      !mainTurnAdmission && conversationAuthority
+        ? {
+            status: conversationAuthority.status,
+            error: conversationAuthority.error,
+            errorReportable: conversationAuthority.errorReportable,
+            resumeRecovery: conversationAuthority.resumeRecovery
+          }
+        : mainOwnedStatus
+          ? { status: mainOwnedStatus }
+          : {}
     // Once Main has durable Session-details ownership, a stale whole-Session renderer save may
     // continue the transcript but cannot roll back generated/manual copy or its attempt/usage
     // record. New and legacy Sessions can still establish their initial fallback on the first save;
