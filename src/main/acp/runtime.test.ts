@@ -13713,7 +13713,7 @@ describe('ACP runtime session management', () => {
     ])
   })
 
-  it('silently allows OpenCode native skill loading without publishing a permission request', async () => {
+  it('routes OpenCode native skill loading through managed approval when no grant exists', async () => {
     const process = new FakeAgentProcess()
     const permissionRequests: AcpPermissionRequest[] = []
     let permissionResponse: unknown
@@ -13744,9 +13744,13 @@ describe('ACP runtime session management', () => {
     })
     const session = await runtime.createSession({ cwd: '/workspace', permissionProfile: 'ask' })
 
-    await runtime.sendPrompt({ sessionId: session.sessionId, text: 'load a skill' })
-
-    expect(permissionRequests).toEqual([])
+    const prompt = runtime.sendPrompt({ sessionId: session.sessionId, text: 'load a skill' })
+    await vi.waitFor(() => expect(permissionRequests).toHaveLength(1))
+    await runtime.respondToPermission({
+      requestId: permissionRequests[0].requestId,
+      optionId: 'once'
+    })
+    await prompt
     expect(permissionResponse).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } })
     expect(runtime.getSnapshot().permissionGrants[session.sessionId]).toEqual([])
   })

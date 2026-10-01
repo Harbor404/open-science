@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -23,6 +23,8 @@ import {
   withTrustedNativeToolIdentity,
   type PermissionPolicyContext
 } from './permission-policy'
+import { initLogger, flushLogs } from '../logger'
+import * as mainLogger from '../logger'
 import type { SessionPermissionRuntimeContext } from '../../shared/session-persistence'
 
 type EmittedPermissionRequest = Parameters<ConstructorParameters<typeof AcpPermissionBroker>[0]>[0]
@@ -1302,7 +1304,7 @@ describe('ACP permission broker', () => {
     ])
   })
 
-  it('silently allows OpenCode native skill loading without remembering a grant', async () => {
+  it('routes verified OpenCode native skill loading through managed approval without a grant', async () => {
     const emitted: EmittedPermissionRequest[] = []
     const broker = new AcpPermissionBroker((request) => emitted.push(request))
     const skillRequest = (): RequestPermissionRequest =>
@@ -1315,7 +1317,8 @@ describe('ACP permission broker', () => {
       profile: 'ask',
       frameworkId: 'opencode'
     })
-    expect(emitted).toEqual([])
+    expect(emitted).toHaveLength(1)
+    await broker.respond({ requestId: emitted[0].requestId, optionId: 'allow-once' })
     await expect(response).resolves.toEqual({
       outcome: { outcome: 'selected', optionId: 'allow-once' }
     })
@@ -2783,4 +2786,100 @@ describe('ACP permission broker', () => {
     )
     expect(emittedRequests).toHaveLength(countBeforeWrite + 1)
   })
+})
+
+it('records permission fallback, automatic authority and settlement without provider payloads', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'permission-decision-log-'))
+  initLogger({ logDir: root, mirrorToConsole: false })
+  const emitted: EmittedPermissionRequest[] = []
+  const broker = new AcpPermissionBroker((request) => emitted.push(request))
+  try {
+    const params = createPermissionRequest('private-session-canary')
+    params.toolCall = {
+      toolCallId: 'private-tool-canary',
+      title: 'private-title-canary',
+      kind: 'other',
+      rawInput: { command: 'private-command-canary', token: 'private-token-canary' },
+      _meta: { toolName: 'private-name-canary' }
+    }
+    const pending = broker.requestPermission(params, {
+      profile: 'ask',
+      frameworkId: 'codex',
+      modelRoute: 'codex-bridge'
+    })
+    expect(emitted).toHaveLength(1)
+    await broker.respond({ requestId: emitted[0].requestId, optionId: 'reject-once' })
+    await pending
+    await broker.requestPermission(params, {
+      profile: 'full',
+      frameworkId: 'codex',
+      modelRoute: 'codex-responses'
+    })
+    await flushLogs()
+    const contents = await readFile(join(root, 'main.log'), 'utf8')
+    const events = contents
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+      .filter((record) => record.scope === 'permission')
+      .map((record) => record.data)
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'decision',
+          modelRoute: 'codex-bridge',
+          authority: 'human',
+          fallback: true,
+          reason: 'capability_unmapped',
+          outcome: 'approval_required'
+        }),
+        expect.objectContaining({ stage: 'settlement', authority: 'human', outcome: 'rejected' }),
+        expect.objectContaining({
+          stage: 'decision',
+          modelRoute: 'codex-responses',
+          authority: 'automatic_policy',
+          reason: 'full_access',
+          outcome: 'allowed'
+        })
+      ])
+    )
+    expect(new Set(events.map((event) => event.toolCallRef)).size).toBe(1)
+    expect(contents).not.toContain('private-')
+  } finally {
+    broker.cancelAllPending()
+    await flushLogs()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('does not change permission outcomes when diagnostic logging fails', async () => {
+  const create = mainLogger.createLogger
+  const logging = vi.spyOn(mainLogger, 'createLogger').mockImplementation((scope) =>
+    scope === 'permission'
+      ? {
+          ...create(scope),
+          info: () => {
+            throw new Error('log unavailable')
+          }
+        }
+      : create(scope)
+  )
+  const emit = vi.fn()
+  const broker = new AcpPermissionBroker(emit)
+  try {
+    const pending = broker.requestPermission(createPermissionRequest(), { profile: 'ask' })
+    expect(emit).toHaveBeenCalledOnce()
+    await broker.respond({ requestId: emit.mock.calls[0][0].requestId, optionId: 'reject-once' })
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'reject-once' }
+    })
+    await expect(
+      broker.requestPermission(createPermissionRequest(), { profile: 'full' })
+    ).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow-once' }
+    })
+  } finally {
+    logging.mockRestore()
+    broker.cancelAllPending()
+  }
 })

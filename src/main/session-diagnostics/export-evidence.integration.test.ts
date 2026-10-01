@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import * as tar from 'tar'
 import { createLogger, errorLogFields, flushLogs, initLogger } from '../logger'
+import { logPermissionDiagnostic } from '../permission-grants/diagnostics'
 import { runSessionDiagnosticWorker } from './collector'
 
 const roots: string[] = []
@@ -34,6 +35,17 @@ it('preserves an unfamiliar operation failure through real logging, rotation, re
     projectId: 'project',
     ...errorLogFields(error)
   })
+  logPermissionDiagnostic({
+    stage: 'decision',
+    frameworkId: 'opencode',
+    modelRoute: 'opencode-openai',
+    sessionId: 'session',
+    toolCallId: '/opt/private-user/private-tool',
+    fallback: true,
+    reason: 'capability_unmapped',
+    outcome: 'approval_required',
+    authority: 'human'
+  })
   await flushLogs()
   // Force exactly one rotation with a record that fits alone but exceeds the remaining file space.
   log.info('rotation boundary', { reason: 'x'.repeat(3600) })
@@ -63,6 +75,9 @@ it('preserves an unfamiliar operation failure through real logging, rotation, re
     'an-unregistered-operation',
     'reading-a-new-source',
     'operation-evidence',
+    'permission decision trace',
+    'capability_unmapped',
+    'opencode-openai',
     'disk read failed',
     'EIO',
     'read',

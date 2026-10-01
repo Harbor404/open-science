@@ -16,8 +16,14 @@ import type {
 import type { SessionPermissionRuntimeContext } from '../../shared/session-persistence'
 import type { CommandShellDialect } from '../agent-framework/types'
 import { createLogger } from '../logger'
+import {
+  logPermissionDiagnostic,
+  type PermissionDiagnostic
+} from '../permission-grants/diagnostics'
 import { extractProviderToolName } from './runtime-events'
 import {
+  isManagedSkillPermission,
+  resolveAutomaticPermissionReason,
   isNativeWebFetchPermission,
   isNativeWebSearchPermission,
   isMcpToolName,
@@ -43,6 +49,7 @@ import type { PermissionGrantRegistry } from '../permission-grants/registry'
 type PendingPermission = {
   request: AcpPermissionRequest
   appOwned?: true
+  decisionAuthority?: PermissionDiagnostic['authority']
   automaticRequest?: RequestPermissionRequest
   policyContext?: PermissionPolicyContext
   categoryKey?: string
@@ -897,37 +904,86 @@ class AcpPermissionBroker {
       if (!optionId) continue
       if (!isCurrent()) break
 
+      pending.decisionAuthority = 'automatic_policy'
       if (await this.respond({ requestId, optionId })) resolvedRequestIds.push(requestId)
     }
     return resolvedRequestIds
   }
 
-  // Registry notifications also reach sibling delegated runtimes. Recheck only verified search
-  // requests, and release each through its own one-shot response and durable settlement path.
-  async releaseGrantedWebSearchRequests(): Promise<void> {
+  // Registry notifications also reach sibling delegated runtimes. Recheck every mapped capability
+  // through the same lookup as new calls; each provider still receives only a one-shot response.
+  async releaseGrantedRequests(): Promise<void> {
     if (!this.permissionGrantRegistry) return
     for (const [requestId, pending] of Array.from(this.pendingRequests)) {
-      if (
-        pending.categoryKey !== 'builtin:web_search' ||
-        !pending.capability ||
-        !pending.providerAllowOnceOptionId
-      )
-        continue
+      if (pending.appOwned || !pending.capability || !pending.providerAllowOnceOptionId) continue
       try {
-        const match = await this.permissionGrantRegistry.resolve(pending.capability, {
-          projectId: pending.projectId,
-          sessionId: pending.policyContext?.permissionGrantSessionId ?? pending.request.sessionId
-        })
-        if (match && this.pendingRequests.get(requestId) === pending) {
+        const match = await this.resolveGrant(
+          pending.capability,
+          pending.categoryKey,
+          pending.request.sessionId,
+          pending.policyContext
+        )
+        if (
+          match &&
+          this.pendingRequests.get(requestId) === pending &&
+          this.isPendingCurrent(pending)
+        ) {
+          pending.decisionAuthority = 'registry_grant'
           await this.respond({ requestId, optionId: pending.providerAllowOnceOptionId })
         }
       } catch (error) {
-        createLogger('acp-permission').warn(
-          'Could not recheck pending web search authorization',
-          error
-        )
+        createLogger('acp-permission').warn('Could not recheck pending permission authorization', {
+          errorType: error instanceof Error ? error.name : 'unknown'
+        })
       }
     }
+  }
+
+  private isPendingCurrent(pending: PendingPermission): boolean {
+    const live = this.livePermissionProfiles.get(pending.request.sessionId)
+    return (
+      (!live || live.isCurrent()) &&
+      (!pending.durableCandidate?.restoredContinuation ||
+        pending.durableCandidate.restoredContinuation.isCurrent?.() === true)
+    )
+  }
+
+  private async resolveGrant(
+    capability: PermissionCapability,
+    categoryKey: string | undefined,
+    sessionId: string,
+    context?: PermissionPolicyContext
+  ): Promise<Awaited<ReturnType<PermissionGrantRegistry['resolve']>>> {
+    const scope = {
+      projectId: context?.projectId,
+      sessionId: context?.permissionGrantSessionId ?? sessionId
+    }
+    const match = await this.permissionGrantRegistry?.resolve(capability, scope)
+    if (match) return match
+    // Preserve old exact MCP loader grants only on their original verified loader path. Never
+    // turn that historical authority into a grant for another framework's native Skill tool.
+    if (capability.key === 'skill:invoke' && categoryKey === 'mcp:skills/load_skill') {
+      return this.permissionGrantRegistry?.resolve({ kind: 'mcp_tool', key: categoryKey }, scope)
+    }
+    return undefined
+  }
+
+  private trace(
+    pending: Pick<PendingPermission, 'request' | 'policyContext' | 'capability'>,
+    details: Omit<PermissionDiagnostic, 'sessionId' | 'toolCallId' | 'requestId' | 'capability'>
+  ): void {
+    logPermissionDiagnostic({
+      sessionId: pending.request.sessionId,
+      toolCallId: pending.request.toolCallId,
+      requestId: pending.request.requestId,
+      frameworkId: pending.policyContext?.frameworkId,
+      modelRoute: pending.policyContext?.modelRoute,
+      profile:
+        this.livePermissionProfiles.get(pending.request.sessionId)?.profile.selectedProfile ??
+        pending.policyContext?.profile,
+      capability: pending.capability,
+      ...details
+    })
   }
 
   // Lists the app conversation's grants so the composer can show and revoke them.
@@ -1032,20 +1088,29 @@ class AcpPermissionBroker {
         ? codexCommandGroup(params, policyContext.shellDialect)
         : undefined
     const codexGroup = codexGroupMatch?.kind === 'group' ? codexGroupMatch.group : undefined
-    const categoryKey = isWebSearch
-      ? 'builtin:web_search'
-      : isWebFetch
-        ? 'builtin:web_fetch'
-        : (codexGroup?.categoryKey ??
-          (codexGroupMatch?.kind === 'unsafe'
-            ? undefined
-            : resolveCategoryKey(
-                params,
-                mcpServerNames,
-                !this.permissionGrantRegistry,
-                policyContext?.notebookShellRuntimeQualifier ?? policyContext?.notebookShellRuntime
-              )))
-    const capability = categoryKey ? capabilityFromLegacyCategory(categoryKey) : undefined
+    const managedSkill = isManagedSkillPermission(params, policyContext)
+    const categoryKey =
+      managedSkill && !isMcp
+        ? 'skill'
+        : isWebSearch
+          ? 'builtin:web_search'
+          : isWebFetch
+            ? 'builtin:web_fetch'
+            : (codexGroup?.categoryKey ??
+              (codexGroupMatch?.kind === 'unsafe'
+                ? undefined
+                : resolveCategoryKey(
+                    params,
+                    mcpServerNames,
+                    !this.permissionGrantRegistry,
+                    policyContext?.notebookShellRuntimeQualifier ??
+                      policyContext?.notebookShellRuntime
+                  )))
+    const capability: PermissionCapability | undefined = managedSkill
+      ? { kind: 'skill_operation', key: 'skill:invoke' }
+      : categoryKey
+        ? capabilityFromLegacyCategory(categoryKey)
+        : undefined
     const mcpIdentity = isMcp
       ? (resolveTrustedMcpToolIdentity(params, mcpServerNames) ??
         resolveMcpToolIdentity(params.toolCall.title, mcpServerNames) ??
@@ -1063,6 +1128,18 @@ class AcpPermissionBroker {
     // Remembered scopes are app-owned, but every released call must still select a provider-native
     // one-call option. Without one there is no safe positive response, so fail closed immediately.
     if (!providerAllowOnceOption) {
+      logPermissionDiagnostic({
+        stage: 'decision',
+        sessionId: params.sessionId,
+        toolCallId: params.toolCall.toolCallId,
+        requestId,
+        frameworkId: policyContext?.frameworkId,
+        modelRoute: policyContext?.modelRoute,
+        capability,
+        fallback: true,
+        reason: 'allow_once_unavailable',
+        outcome: 'cancelled'
+      })
       return Promise.resolve({ outcome: { outcome: 'cancelled' } })
     }
     const permissionOptions: AcpPermissionRequest['options'] = providerPermissionOptions.map(
@@ -1125,6 +1202,19 @@ class AcpPermissionBroker {
       rawInput: params.toolCall.rawInput,
       options: permissionOptions
     }
+    const diagnostic = { request, policyContext, capability }
+    this.trace(diagnostic, {
+      stage: 'request',
+      reportedToolName: extractProviderToolName(params.toolCall),
+      identitySource:
+        trustedMcpToolIdentity(params) || managedSkill
+          ? 'verified_context'
+          : extractProviderToolName(params.toolCall)
+            ? 'provider_metadata'
+            : params.toolCall.kind
+              ? 'tool_kind'
+              : 'unavailable'
+    })
     const fingerprint = permissionRequestFingerprint(request)
     const restored = this.restoredContinuations.get(request.sessionId)
     const restoredContinuation =
@@ -1165,6 +1255,7 @@ class AcpPermissionBroker {
       (restoredAllowOnce.categoryKey === categoryKey || legacyCategoryCanMatch)
     ) {
       this.restoredAllowOnceBySession.delete(request.sessionId)
+      this.trace(diagnostic, { stage: 'decision', authority: 'restored_once', outcome: 'allowed' })
       markReleased()
       return Promise.resolve({
         outcome: { outcome: 'selected', optionId: providerAllowOnceOption.optionId }
@@ -1181,6 +1272,12 @@ class AcpPermissionBroker {
     )
 
     if (automaticOptionId) {
+      this.trace(diagnostic, {
+        stage: 'decision',
+        authority: 'automatic_policy',
+        reason: this.automaticReason(automaticRequest, policyContext),
+        outcome: 'allowed'
+      })
       markReleased()
       return Promise.resolve({
         outcome: { outcome: 'selected', optionId: automaticOptionId }
@@ -1189,11 +1286,7 @@ class AcpPermissionBroker {
 
     if (this.permissionGrantRegistry && capability) {
       const sessionCancellationToken = this.trackSessionCancellation(params.sessionId)
-      return this.permissionGrantRegistry
-        .resolve(capability, {
-          projectId: policyContext?.projectId,
-          sessionId: policyContext?.permissionGrantSessionId ?? params.sessionId
-        })
+      return this.resolveGrant(capability, categoryKey, params.sessionId, policyContext)
         .then((match) => {
           if (
             cancellationGeneration !== this.cancellationGeneration ||
@@ -1203,6 +1296,16 @@ class AcpPermissionBroker {
             return { outcome: { outcome: 'cancelled' as const } }
           }
           if (match && providerAllowOnceOption) {
+            this.trace(diagnostic, {
+              stage: 'decision',
+              authority: 'registry_grant',
+              matchedScope: match.matchedScope,
+              outcome: 'allowed',
+              reason:
+                match.grant.capability.key !== capability.key
+                  ? 'legacy_exact_loader_grant'
+                  : 'capability_grant'
+            })
             markReleased()
             return {
               outcome: { outcome: 'selected' as const, optionId: providerAllowOnceOption.optionId }
@@ -1231,6 +1334,7 @@ class AcpPermissionBroker {
       : undefined
 
     if (autoAllowOptionId) {
+      this.trace(diagnostic, { stage: 'decision', authority: 'legacy_session', outcome: 'allowed' })
       markReleased()
       return Promise.resolve({
         outcome: { outcome: 'selected', optionId: autoAllowOptionId }
@@ -1257,12 +1361,35 @@ class AcpPermissionBroker {
       : undefined
 
     if (liveAutomaticOptionId) {
+      this.trace(pending, {
+        stage: 'decision',
+        authority: 'automatic_policy',
+        reason: this.automaticReason(pending.automaticRequest!, pending.policyContext),
+        outcome: 'allowed'
+      })
       return Promise.resolve({
         outcome: { outcome: 'selected', optionId: liveAutomaticOptionId }
       })
     }
 
     return this.enqueuePermissionRequest(pending)
+  }
+
+  private automaticReason(
+    request: RequestPermissionRequest,
+    context?: PermissionPolicyContext
+  ): string | undefined {
+    const live = this.livePermissionProfiles.get(request.sessionId)
+    return resolveAutomaticPermissionReason(
+      request,
+      live
+        ? {
+            ...context,
+            profile: live.profile.selectedProfile,
+            autoReviewStrategy: live.profile.autoReviewStrategy
+          }
+        : context
+    )
   }
 
   private resolveCurrentAutomaticPermission(
@@ -1284,6 +1411,11 @@ class AcpPermissionBroker {
     pending: Omit<PendingPermission, 'resolve' | 'reject'> & { requestId: string }
   ): Promise<RequestPermissionResponse> {
     if (pending.policyContext?.permissionPrompts === 'none') {
+      this.trace(pending, {
+        stage: 'decision',
+        reason: 'permission_prompts_disabled',
+        outcome: 'rejected'
+      })
       const reject = pending.request.options.find((option) => option.kind === 'reject_once')
       try {
         this.onPermissionSettled?.(
@@ -1300,6 +1432,19 @@ class AcpPermissionBroker {
           : { outcome: 'cancelled' }
       })
     }
+    this.trace(pending, {
+      stage: 'decision',
+      authority: 'human',
+      outcome: 'approval_required',
+      fallback: !pending.appOwned && (!pending.capability || !this.permissionGrantRegistry),
+      reason: pending.appOwned
+        ? 'app_owned_approval'
+        : !pending.capability
+          ? 'capability_unmapped'
+          : !this.permissionGrantRegistry
+            ? 'registry_unavailable'
+            : 'grant_not_matched'
+    })
     let resolveResponse!: (response: RequestPermissionResponse) => void
     let rejectResponse!: (error: unknown) => void
     const response = new Promise<RequestPermissionResponse>((resolve, reject) => {
@@ -1314,7 +1459,7 @@ class AcpPermissionBroker {
     }
     this.pendingRequests.set(requestId, stored)
     // Close the gap between the initial registry lookup and joining the pending queue.
-    if (stored.categoryKey === 'builtin:web_search') void this.releaseGrantedWebSearchRequests()
+    if (stored.capability) void this.releaseGrantedRequests()
 
     if (!stored.durableCandidate || !this.permissionWaitHooks) {
       this.emitPermissionRequest(entry.request)
@@ -1417,6 +1562,7 @@ class AcpPermissionBroker {
     }
 
     this.pendingRequests.delete(response.requestId)
+    pending.decisionAuthority ??= 'human'
 
     // Keep the claimed request cancellable until its provider decision is released.
     this.respondingRequests.set(response.requestId, pending)
@@ -1507,6 +1653,21 @@ class AcpPermissionBroker {
 
       const persistence = this.persistLiveSettlement(pending)
       if (persistence) await persistence
+      if (pending.decisionAuthority === 'registry_grant') {
+        const match =
+          pending.capability &&
+          this.isPendingCurrent(pending) &&
+          (await this.resolveGrant(
+            pending.capability,
+            pending.categoryKey,
+            pending.request.sessionId,
+            pending.policyContext
+          ))
+        if (!match || !this.isPendingCurrent(pending)) {
+          this.settlePending(pending, { outcome: { outcome: 'cancelled' } }, 'cancelled')
+          return true
+        }
+      }
 
       this.settlePending(
         pending,
@@ -1571,6 +1732,11 @@ class AcpPermissionBroker {
   ): void {
     if (pending.settled) return
     pending.settled = true
+    this.trace(pending, {
+      stage: 'settlement',
+      authority: pending.decisionAuthority ?? 'system',
+      outcome: state
+    })
     pending.resolve(response)
     try {
       this.onPermissionSettled?.(pending.request.requestId, state, pending.request)
