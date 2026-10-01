@@ -14,6 +14,11 @@ export type ManuscriptArtifactReference = Readonly<{
 
 export type ResolvedManuscriptReference = ManuscriptArtifactReference
 
+export type ManuscriptCitationKey = Readonly<{
+  itemId: string
+  citationKey: string
+}>
+
 export type PrepareManuscriptRequest = Readonly<{
   projectId: string
   appSessionId: string
@@ -24,6 +29,12 @@ export type ManuscriptBibliography = Readonly<{
   filename: string
   content: string
   itemIds: readonly string[]
+  citationKeys: readonly ManuscriptCitationKey[]
+}>
+
+export type ManuscriptBibtexExport = Readonly<{
+  content: string
+  citationKeys: readonly ManuscriptCitationKey[]
 }>
 
 export type PrepareManuscriptResult = Readonly<{
@@ -39,7 +50,6 @@ export type RenderManuscriptRequest = PrepareManuscriptRequest &
   Readonly<{
     format: ManuscriptExportFormat
     filename?: string
-    execute?: boolean
   }>
 
 export type RenderManuscriptResult = Readonly<{
@@ -71,7 +81,18 @@ const manuscriptBibliographySchema = z
   .object({
     filename: z.literal('references.bib'),
     content: z.string().min(1),
-    itemIds: z.array(z.string().trim().min(1).max(512)).min(1).max(1_000)
+    itemIds: z.array(z.string().trim().min(1).max(512)).min(1).max(1_000),
+    citationKeys: z
+      .array(
+        z
+          .object({
+            itemId: z.string().trim().min(1).max(512),
+            citationKey: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_:.+-]{0,127}$/u)
+          })
+          .strict()
+      )
+      .min(1)
+      .max(1_000)
   })
   .strict()
 
@@ -97,8 +118,7 @@ const manuscriptExportFormatSchema = z.enum(MANUSCRIPT_EXPORT_FORMATS)
 const renderManuscriptRequestSchema = prepareManuscriptRequestSchema
   .extend({
     format: manuscriptExportFormatSchema,
-    filename: z.string().trim().min(1).max(255).optional(),
-    execute: z.boolean().optional()
+    filename: z.string().trim().min(1).max(255).optional()
   })
   .strict()
 

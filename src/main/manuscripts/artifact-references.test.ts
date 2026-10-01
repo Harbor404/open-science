@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { ArtifactVersionDescriptor } from '../../shared/artifact-provenance'
+import { MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS } from '../../shared/artifacts'
 import { resolveManuscriptReferences } from './artifact-references'
 
 const descriptor = (
@@ -92,6 +93,17 @@ describe('manuscript artifact references', () => {
     ).rejects.toMatchObject({ code: 'STALE_ARTIFACT_VERSION' })
   })
 
+  it('fails closed when the referenced Artifact Version is not finalized', async () => {
+    await expect(
+      resolveManuscriptReferences({
+        projectId: 'project-1',
+        appSessionId: 'session-1',
+        content: manuscript(),
+        resolveVersionDescriptors: vi.fn(async () => [descriptor({ state: 'pending' })])
+      })
+    ).rejects.toMatchObject({ code: 'UNKNOWN_ARTIFACT_VERSION' })
+  })
+
   it('rejects a @fig reference without an explicit immutable binding', async () => {
     await expect(
       resolveManuscriptReferences({
@@ -102,11 +114,68 @@ describe('manuscript artifact references', () => {
       })
     ).rejects.toMatchObject({ code: 'UNKNOWN_ARTIFACT_REFERENCE' })
   })
+
+  it('resolves more references than one Artifact Version descriptor page allows', async () => {
+    const references = Array.from(
+      { length: MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS + 1 },
+      (_, index) => ({
+        label: `fig-${index}`,
+        artifactId: `artifact-${index}`,
+        versionId: `version-${index}`,
+        checksum: index.toString(16).padStart(64, '0')
+      })
+    )
+    const resolveVersionDescriptors = vi.fn(async ({ versionIds }: { versionIds: string[] }) =>
+      versionIds.map((versionId) => {
+        const index = Number(versionId.slice('version-'.length))
+        const reference = references[index]!
+        return descriptor({
+          id: versionId,
+          artifactId: reference.artifactId,
+          versionId,
+          checksum: reference.checksum
+        })
+      })
+    )
+    const bindings = references
+      .map(
+        ({ label, artifactId, versionId, checksum }) => `    ${label}:
+      artifact-id: ${artifactId}
+      version-id: ${versionId}
+      checksum: '${checksum}'`
+      )
+      .join('\n')
+    const content = `---
+title: Batch manuscript
+open-science:
+  artifact-references:
+${bindings}
+---
+
+${references.map(({ label }) => `See @${label}.`).join('\n')}
+`
+
+    const prepared = await resolveManuscriptReferences({
+      projectId: 'project-1',
+      appSessionId: 'session-1',
+      content,
+      resolveVersionDescriptors
+    })
+
+    expect(resolveVersionDescriptors).toHaveBeenCalledTimes(2)
+    expect(
+      resolveVersionDescriptors.mock.calls.map(([request]) => request.versionIds.length)
+    ).toEqual([MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS, 1])
+    expect(prepared.references).toHaveLength(references.length)
+  })
 })
 
 describe('manuscript bibliography', () => {
   it('reuses Literature metadata through the injected BibTeX exporter', async () => {
-    const exportBibtex = vi.fn(async () => '@article{item-1, title={A paper}}\n')
+    const exportBibtex = vi.fn(async () => ({
+      content: '@article{smith2020, title={A paper}}\n',
+      citationKeys: [{ itemId: 'item-1', citationKey: 'smith2020' }]
+    }))
     const content = `---
 title: Cited manuscript
 open-science:
@@ -129,10 +198,13 @@ Quarto cites [@item-1].
     expect(exportBibtex).toHaveBeenCalledWith(['item-1'])
     expect(prepared.bibliography).toEqual({
       filename: 'references.bib',
-      content: '@article{item-1, title={A paper}}\n',
-      itemIds: ['item-1']
+      content: '@article{smith2020, title={A paper}}\n',
+      itemIds: ['item-1'],
+      citationKeys: [{ itemId: 'item-1', citationKey: 'smith2020' }]
     })
     expect(prepared.qmd).toContain('bibliography: references.bib')
+    expect(prepared.qmd).toContain('Quarto cites [@smith2020].')
+    expect(prepared.qmd).not.toContain('Quarto cites [@item-1].')
     expect(prepared.markdown).toContain('Quarto cites [@item-1].')
   })
 })

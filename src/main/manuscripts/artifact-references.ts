@@ -1,8 +1,11 @@
 import { dump, load } from 'js-yaml'
 
 import type { ArtifactVersionDescriptor } from '../../shared/artifact-provenance'
+import { MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS } from '../../shared/artifacts'
 import type {
+  ManuscriptBibtexExport,
   ManuscriptBibliography,
+  ManuscriptCitationKey,
   PrepareManuscriptResult,
   ResolvedManuscriptReference
 } from '../../shared/manuscripts'
@@ -16,7 +19,7 @@ type ResolveManuscriptReferencesRequest = Readonly<{
     appSessionId: string
     versionIds: string[]
   }) => Promise<ArtifactVersionDescriptor[]>
-  exportBibtex?: (itemIds: readonly string[]) => Promise<string>
+  exportBibtex?: (itemIds: readonly string[]) => Promise<ManuscriptBibtexExport>
 }>
 
 type ManuscriptReferenceErrorCode =
@@ -45,6 +48,7 @@ type FrontMatter = {
 const FRONT_MATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u
 const FIGURE_REFERENCE = /(?<![\w@])@(fig-[A-Za-z0-9][A-Za-z0-9_-]*)\b/gu
 const SHA256 = /^[a-f0-9]{64}$/u
+const CITATION_KEY = /^[A-Za-z0-9][A-Za-z0-9_:.+-]{0,127}$/u
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -259,14 +263,101 @@ const prepareBibliography = async (
       'Manuscript bibliography export is unavailable.'
     )
   }
-  const content = await exportBibtex(itemIds)
-  if (typeof content !== 'string' || !content.trim()) {
+  const exported = await exportBibtex(itemIds)
+  if (
+    !isRecord(exported) ||
+    typeof exported.content !== 'string' ||
+    !exported.content.trim() ||
+    !Array.isArray(exported.citationKeys)
+  ) {
     throw new ManuscriptReferenceError(
       'INVALID_MANUSCRIPT_REFERENCE',
       'Manuscript bibliography export returned no records.'
     )
   }
-  return { filename: 'references.bib', content, itemIds }
+
+  const citationKeysByItemId = new Map<string, string>()
+  for (const rawCitationKey of exported.citationKeys) {
+    if (!isRecord(rawCitationKey)) {
+      throw new ManuscriptReferenceError(
+        'INVALID_MANUSCRIPT_REFERENCE',
+        'Manuscript bibliography citation keys must be mappings.'
+      )
+    }
+    const itemId = requiredString(rawCitationKey.itemId, 'bibliography.citation-keys.item-id', 512)
+    const citationKey = requiredString(
+      rawCitationKey.citationKey,
+      'bibliography.citation-keys.citation-key',
+      128
+    )
+    if (!CITATION_KEY.test(citationKey) || !itemIds.includes(itemId)) {
+      throw new ManuscriptReferenceError(
+        'INVALID_MANUSCRIPT_REFERENCE',
+        'Manuscript bibliography citation keys are invalid.'
+      )
+    }
+    if (citationKeysByItemId.has(itemId)) {
+      throw new ManuscriptReferenceError(
+        'INVALID_MANUSCRIPT_REFERENCE',
+        `Manuscript bibliography item ${itemId} has duplicate citation keys.`
+      )
+    }
+    citationKeysByItemId.set(itemId, citationKey)
+  }
+  if (itemIds.some((itemId) => !citationKeysByItemId.has(itemId))) {
+    throw new ManuscriptReferenceError(
+      'INVALID_MANUSCRIPT_REFERENCE',
+      'Manuscript bibliography export is missing citation keys.'
+    )
+  }
+  const citationKeys: ManuscriptCitationKey[] = itemIds.map((itemId) => ({
+    itemId,
+    citationKey: citationKeysByItemId.get(itemId)!
+  }))
+  if (new Set(citationKeys.map(({ citationKey }) => citationKey)).size !== citationKeys.length) {
+    throw new ManuscriptReferenceError(
+      'INVALID_MANUSCRIPT_REFERENCE',
+      'Manuscript bibliography contains duplicate citation keys.'
+    )
+  }
+
+  return { filename: 'references.bib', content: exported.content, itemIds, citationKeys }
+}
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+
+const rewriteCitationKeys = (body: string, bibliography?: ManuscriptBibliography): string => {
+  if (!bibliography) return body
+  let rewritten = body
+  for (const { itemId, citationKey } of bibliography.citationKeys) {
+    if (itemId === citationKey) continue
+    const citation = new RegExp(
+      `(?<![\\w@])@${escapeRegExp(itemId)}(?=\\s*(?:[,.;:!?)\\]}]|$))`,
+      'gu'
+    )
+    rewritten = rewritten.replace(citation, `@${citationKey}`)
+  }
+  return rewritten
+}
+
+const resolveVersionDescriptorsInPages = async (
+  resolveVersionDescriptors: ResolveManuscriptReferencesRequest['resolveVersionDescriptors'],
+  request: { projectId: string; appSessionId: string; versionIds: string[] }
+): Promise<ArtifactVersionDescriptor[]> => {
+  const descriptors: ArtifactVersionDescriptor[] = []
+  for (
+    let index = 0;
+    index < request.versionIds.length;
+    index += MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS
+  ) {
+    descriptors.push(
+      ...(await resolveVersionDescriptors({
+        ...request,
+        versionIds: request.versionIds.slice(index, index + MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS)
+      }))
+    )
+  }
+  return descriptors
 }
 
 const resolveManuscriptReferences = async ({
@@ -295,13 +386,13 @@ const resolveManuscriptReferences = async ({
     const preparedBody = frontMatter.body
     return {
       markdown: preparedBody,
-      qmd: renderQmd(frontMatter, preparedBody, bibliography),
+      qmd: renderQmd(frontMatter, rewriteCitationKeys(preparedBody, bibliography), bibliography),
       references: [],
       ...(bibliography ? { bibliography } : {})
     }
   }
 
-  const descriptors = await resolveVersionDescriptors({
+  const descriptors = await resolveVersionDescriptorsInPages(resolveVersionDescriptors, {
     projectId,
     appSessionId,
     versionIds: [...new Set(unresolved.map((reference) => reference.versionId))]
@@ -336,7 +427,7 @@ const resolveManuscriptReferences = async ({
   const preparedBody = `${withCaptions.trimEnd()}${provenanceSupplement(references)}`
   return {
     markdown: preparedBody,
-    qmd: renderQmd(frontMatter, preparedBody, bibliography),
+    qmd: renderQmd(frontMatter, rewriteCitationKeys(preparedBody, bibliography), bibliography),
     references,
     ...(bibliography ? { bibliography } : {})
   }

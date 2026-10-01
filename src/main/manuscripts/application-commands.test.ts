@@ -135,6 +135,32 @@ describe('Manuscript application commands', () => {
     expect(owner.render).not.toHaveBeenCalled()
   })
 
+  it('rejects renderer requests that opt into Quarto code execution', async () => {
+    const owner = {
+      detectQuarto: vi.fn(),
+      prepare: vi.fn(),
+      render: vi.fn()
+    } as unknown as ManuscriptCommandOwner
+    const router = createApplicationCommandRouter()
+    installManuscriptApplicationCommands(router.registrar, owner)
+
+    await expect(
+      router.dispatcher.invoke(
+        manuscriptRenderCommand,
+        invocation([
+          {
+            projectId: 'project-1',
+            appSessionId: 'session-1',
+            content: '# Paper\n',
+            format: 'pdf',
+            execute: true
+          } as never
+        ])
+      )
+    ).rejects.toMatchObject({ code: 'invalid-command-arguments' })
+    expect(owner.render).not.toHaveBeenCalled()
+  })
+
   it('rejects remote callers before execution', async () => {
     const owner = {
       detectQuarto: vi.fn(),

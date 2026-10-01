@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import type { ApplicationEvents } from '../application-events'
 import { BrowserWindow, dialog, webContents, type WebContents } from 'electron'
 import { createAcpRuntime } from '../acp/runtime-composition'
@@ -6,6 +8,7 @@ import type { ApplicationInvocation } from '../application-command-router'
 import { createCliCommandOwner } from '../cli-install/ipc'
 import { createGithubCommandOwner } from '../github-ipc'
 import { createLiteratureCommandOwner } from '../literature/command-owner'
+import { citationKey } from '../literature/citation-formatter'
 import { createManuscriptCommandOwner } from '../manuscripts/command-owner'
 import { discoverQuarto } from '../manuscripts/quarto-discovery'
 import { errorLogFields } from '../logger'
@@ -38,6 +41,8 @@ import type { composeSessionSurfaces } from './session-surfaces'
 import type { composeSettingsBootstrap } from './settings-bootstrap'
 import type { composeSettingsEffects } from './settings-effects'
 import type { composeStorageStartup } from './storage-startup'
+
+const SAFE_BIBTEX_ID = /^[A-Za-z0-9][A-Za-z0-9_:.+-]{0,127}$/u
 
 export function composeCommandDependencies({
   applicationEvents,
@@ -202,10 +207,26 @@ export function composeCommandDependencies({
         if (items.length !== itemIds.length) {
           throw new Error('One or more manuscript bibliography items are unavailable.')
         }
-        return researchCatalog.literatureCitationFormatter.exportReferences(
-          items.map(({ id, item }) => ({ id, item })),
-          'bibtex'
-        )
+        const references = items.map(({ id, item }) => ({
+          id: SAFE_BIBTEX_ID.test(id)
+            ? id
+            : `os${createHash('sha256').update(id).digest('hex').slice(0, 12)}`,
+          item
+        }))
+        const citationKeys = items.map(({ id }, index) => ({
+          itemId: id,
+          citationKey: citationKey(references[index]!.id, references[index]!.item)
+        }))
+        if (new Set(citationKeys.map(({ citationKey: key }) => key)).size !== citationKeys.length) {
+          throw new Error('One or more manuscript bibliography items have duplicate citation keys.')
+        }
+        return {
+          content: await researchCatalog.literatureCitationFormatter.exportReferences(
+            references,
+            'bibtex'
+          ),
+          citationKeys
+        }
       },
       approve: async ({ sessionId, title, rawInput, signal }) => {
         const runtime = runtimeRef.current

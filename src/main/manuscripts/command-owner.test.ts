@@ -57,7 +57,7 @@ describe('manuscript command owner', () => {
           version: '1.7.32'
         }),
         resolveVersionDescriptors: vi.fn(async () => []),
-        exportBibtex: vi.fn(async () => ''),
+        exportBibtex: vi.fn(async () => ({ content: '', citationKeys: [] })),
         approve: approval
       })
 
@@ -108,7 +108,7 @@ describe('manuscript command owner', () => {
           'Quarto was not found. Install Quarto and ensure "quarto" is on PATH, then retry. Other preview and export formats are unaffected.'
       }),
       resolveVersionDescriptors: vi.fn(async () => []),
-      exportBibtex: vi.fn(async () => ''),
+      exportBibtex: vi.fn(async () => ({ content: '', citationKeys: [] })),
       approve: approval
     })
 
@@ -124,6 +124,69 @@ describe('manuscript command owner', () => {
     expect(approval).not.toHaveBeenCalled()
   })
 
+  it('always disables Quarto execution even for a legacy caller request', async () => {
+    const root = await createRoot()
+    const { path: quartoPath, argvLog } = await createFakeQuarto(root)
+    const owner = createManuscriptCommandOwner({
+      discoverQuarto: async () => ({
+        available: true,
+        path: quartoPath,
+        version: '1.7.32'
+      }),
+      resolveVersionDescriptors: vi.fn(async () => []),
+      exportBibtex: vi.fn(async () => ({ content: '', citationKeys: [] })),
+      approve: async () => true
+    })
+
+    await owner.render({
+      projectId: 'project-1',
+      appSessionId: 'session-1',
+      workingDirectory: root,
+      format: 'html',
+      content: '# Paper\n',
+      execute: true
+    } as never)
+
+    expect((await readFile(argvLog, 'utf8')).trim().split('\n')).toContain('--no-execute')
+  })
+
+  it('removes its owned working directory when preparation fails before render', async () => {
+    const workDirectoryPrefix = 'open-science-manuscript-work-'
+    const before = (await readdir(tmpdir())).filter((name) => name.startsWith(workDirectoryPrefix))
+    const owner = createManuscriptCommandOwner({
+      discoverQuarto: async () => ({
+        available: true,
+        path: '/fake/quarto',
+        version: '1.7.32'
+      }),
+      resolveVersionDescriptors: vi.fn(async () => []),
+      exportBibtex: vi.fn(async () => ({ content: '', citationKeys: [] })),
+      approve: async () => true
+    })
+
+    await expect(
+      owner.render({
+        projectId: 'project-1',
+        appSessionId: 'session-1',
+        format: 'html',
+        content: `---
+open-science:
+  artifact-references:
+    fig-missing:
+      artifact-id: artifact-1
+      version-id: version-1
+      checksum: ${'a'.repeat(64)}
+---
+
+See @fig-missing.
+`
+      })
+    ).rejects.toMatchObject({ code: 'UNKNOWN_ARTIFACT_VERSION' })
+
+    const after = (await readdir(tmpdir())).filter((name) => name.startsWith(workDirectoryPrefix))
+    expect(after).toEqual(before)
+  })
+
   it('does not run Quarto when the command approval is denied', async () => {
     const root = await createRoot()
     const { path: quartoPath, argvLog } = await createFakeQuarto(root)
@@ -134,7 +197,7 @@ describe('manuscript command owner', () => {
         version: '1.7.32'
       }),
       resolveVersionDescriptors: vi.fn(async () => []),
-      exportBibtex: vi.fn(async () => ''),
+      exportBibtex: vi.fn(async () => ({ content: '', citationKeys: [] })),
       approve: async () => false
     })
 

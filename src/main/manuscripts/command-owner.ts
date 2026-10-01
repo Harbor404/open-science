@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import type { ArtifactVersionDescriptor } from '../../shared/artifact-provenance'
 import {
   isManuscriptExportFormat,
+  type ManuscriptBibtexExport,
   type ManuscriptExportFormat,
   type PrepareManuscriptRequest,
   type PrepareManuscriptResult,
@@ -43,7 +44,7 @@ type ManuscriptCommandOwnerDependencies = Readonly<{
     appSessionId: string
     versionIds: string[]
   }) => Promise<ArtifactVersionDescriptor[]>
-  exportBibtex: (itemIds: readonly string[]) => Promise<string>
+  exportBibtex: (itemIds: readonly string[]) => Promise<ManuscriptBibtexExport>
   approve: (request: ManuscriptApprovalRequest) => Promise<boolean>
   run?: (request: CommandRunRequest) => Promise<{ stdout: string; stderr: string }>
   createId?: () => string
@@ -125,22 +126,27 @@ const createManuscriptCommandOwner = (
       if (!detection.available) throw new Error(detection.reason)
 
       const ownedWorkingDirectory = request.workingDirectory === undefined
-      const workingDirectory =
-        request.workingDirectory ?? (await mkdtemp(join(tmpdir(), 'open-science-manuscript-work-')))
-      await mkdir(workingDirectory, { recursive: true })
-      const prepared = await prepare(request)
-      const names = outputFilename(request.filename, request.format)
-      const id = createId().replace(/[^A-Za-z0-9_-]/gu, '-')
-      const qmdPath = join(workingDirectory, `.open-science-manuscript-${id}.qmd`)
-      const bibliographyName = `.open-science-manuscript-${id}.bib`
-      const bibliographyPath = join(workingDirectory, bibliographyName)
-      const outputRoot = await mkdtemp(join(tmpdir(), 'open-science-quarto-'))
-      const outputPath = join(outputRoot, names.output)
-      const qmd = prepared.bibliography
-        ? prepared.qmd.replaceAll('references.bib', bibliographyName)
-        : prepared.qmd
-
+      let workingDirectory: string | undefined
+      let qmdPath: string | undefined
+      let bibliographyPath: string | undefined
+      let outputRoot: string | undefined
       try {
+        workingDirectory =
+          request.workingDirectory ??
+          (await mkdtemp(join(tmpdir(), 'open-science-manuscript-work-')))
+        await mkdir(workingDirectory, { recursive: true })
+        const prepared = await prepare(request)
+        const names = outputFilename(request.filename, request.format)
+        const id = createId().replace(/[^A-Za-z0-9_-]/gu, '-')
+        qmdPath = join(workingDirectory, `.open-science-manuscript-${id}.qmd`)
+        const bibliographyName = `.open-science-manuscript-${id}.bib`
+        bibliographyPath = join(workingDirectory, bibliographyName)
+        outputRoot = await mkdtemp(join(tmpdir(), 'open-science-quarto-'))
+        const outputPath = join(outputRoot, names.output)
+        const qmd = prepared.bibliography
+          ? prepared.qmd.replaceAll('references.bib', bibliographyName)
+          : prepared.qmd
+
         await writeFile(qmdPath, qmd, { encoding: 'utf8', flag: 'wx' })
         if (prepared.bibliography) {
           await writeFile(bibliographyPath, prepared.bibliography.content, {
@@ -155,7 +161,7 @@ const createManuscriptCommandOwner = (
           request.format,
           '--output',
           outputPath,
-          ...(request.execute ? [] : ['--no-execute'])
+          '--no-execute'
         ]
         const approved = await dependencies.approve({
           sessionId: request.appSessionId,
@@ -196,10 +202,12 @@ const createManuscriptCommandOwner = (
         }
       } finally {
         await Promise.all([
-          rm(qmdPath, { force: true }),
-          rm(bibliographyPath, { force: true }),
-          rm(outputRoot, { recursive: true, force: true }),
-          ...(ownedWorkingDirectory ? [rm(workingDirectory, { recursive: true, force: true })] : [])
+          ...(qmdPath ? [rm(qmdPath, { force: true })] : []),
+          ...(bibliographyPath ? [rm(bibliographyPath, { force: true })] : []),
+          ...(outputRoot ? [rm(outputRoot, { recursive: true, force: true })] : []),
+          ...(ownedWorkingDirectory && workingDirectory
+            ? [rm(workingDirectory, { recursive: true, force: true })]
+            : [])
         ]).catch(() => undefined)
       }
     }
