@@ -56,6 +56,61 @@ type VersionPackaging = {
 const reference = (id: string): { '@id': string } => ({ '@id': id })
 const compareText = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0
+
+const stringValues = (value: unknown): string[] =>
+  typeof value === 'string'
+    ? [value]
+    : Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string')
+      : []
+
+const mergeFileEntities = (
+  existing: RoCrateEntity,
+  candidate: RoCrateEntity
+): RoCrateEntity | undefined => {
+  if (
+    existing['@type'] !== 'File' ||
+    candidate['@type'] !== 'File' ||
+    typeof existing.sha256 !== 'string' ||
+    typeof candidate.sha256 !== 'string' ||
+    existing.sha256 !== candidate.sha256 ||
+    typeof existing.contentSize !== 'string' ||
+    typeof candidate.contentSize !== 'string' ||
+    existing.contentSize !== candidate.contentSize
+  ) {
+    return undefined
+  }
+
+  const existingIsPayload = typeof existing.version === 'string'
+  const candidateIsPayload = typeof candidate.version === 'string'
+  const base = candidateIsPayload && !existingIsPayload ? candidate : existing
+  const secondary = base === existing ? candidate : existing
+  const names = [
+    ...stringValues(base.name),
+    ...stringValues(base.alternateName),
+    ...stringValues(secondary.name),
+    ...stringValues(secondary.alternateName)
+  ].filter((value, index, values) => values.indexOf(value) === index)
+  const contentTypes = [
+    ...stringValues(base.encodingFormat),
+    ...stringValues(secondary.encodingFormat)
+  ]
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .sort(compareText)
+
+  const merged: RoCrateEntity = { ...secondary, ...base }
+  if (names.length) merged.name = names[0]
+  else delete merged.name
+  if (names.length > 1) merged.alternateName = names.slice(1)
+  else delete merged.alternateName
+  if (contentTypes.length) {
+    merged.encodingFormat = contentTypes.length === 1 ? contentTypes[0] : contentTypes
+  } else {
+    delete merged.encodingFormat
+  }
+  return merged
+}
+
 const WINDOWS_RESERVED_BASENAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/iu
 
 const pathSegment = (value: string): string => {
@@ -105,6 +160,7 @@ const validateAggregateSource = (source: AggregateRoCrateSource): void => {
 
   const versionIds = new Set<string>()
   const fileVersions = new Map<string, { checksum: string; size: number }>()
+  const checksumSizes = new Map<string, number>()
   const recordFileVersion = (id: string, checksum: string, size: number): void => {
     if (!SHA256_CHECKSUM.test(checksum)) {
       throw new Error(`RO-Crate content checksum is invalid: ${id}`)
@@ -116,7 +172,12 @@ const validateAggregateSource = (source: AggregateRoCrateSource): void => {
     if (existing && (existing.checksum !== checksum || existing.size !== size)) {
       throw new Error(`RO-Crate content identity conflict: ${id}`)
     }
+    const existingSize = checksumSizes.get(checksum)
+    if (existingSize !== undefined && existingSize !== size) {
+      throw new Error(`RO-Crate content checksum has conflicting sizes: ${checksum}`)
+    }
     fileVersions.set(id, { checksum, size })
+    checksumSizes.set(checksum, size)
   }
 
   for (const version of source.versions) {
@@ -301,11 +362,12 @@ const buildAggregateMetadata = (
     for (const candidate of document['@graph']) {
       const existing = entitiesById.get(candidate['@id'])
       if (existing) {
-        const sharedCompleteContent =
-          profile === 'complete' && candidate['@id'].startsWith('data/sha256/')
-        if (!sharedCompleteContent && JSON.stringify(existing) !== JSON.stringify(candidate)) {
-          throw new Error(`RO-Crate entity ID conflict: ${candidate['@id']}`)
-        }
+        if (JSON.stringify(existing) === JSON.stringify(candidate)) continue
+        const merged = mergeFileEntities(existing, candidate)
+        if (!merged) throw new Error(`RO-Crate entity ID conflict: ${candidate['@id']}`)
+        const index = graph.indexOf(existing)
+        if (index >= 0) graph[index] = merged
+        entitiesById.set(merged['@id'], merged)
         continue
       }
       entitiesById.set(candidate['@id'], candidate)

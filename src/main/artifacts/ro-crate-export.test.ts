@@ -408,6 +408,15 @@ describe('Artifact Version RO-Crate export', () => {
       { '@id': lockId }
     ])
     expect(entity(document, './').hasPart).toEqual(expect.arrayContaining([{ '@id': lockId }]))
+
+    const withoutLockEntities = buildArtifactVersionRoCrateMetadata(value, new Map(), {
+      includeEnvironmentLockEntities: false
+    })
+    expect(entity(withoutLockEntities, '#create-action/run-1').instrument).toEqual([
+      { '@id': '#producer-code' },
+      { '@id': '#environment' }
+    ])
+    expect(withoutLockEntities['@graph'].some((entry) => entry['@id'] === lockId)).toBe(false)
   })
 
   it('keeps a SoftwareApplication owner when only a lock is available', () => {

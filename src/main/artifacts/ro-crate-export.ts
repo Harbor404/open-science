@@ -180,7 +180,8 @@ const buildArtifactVersionRoCrateMetadata = (
             packagedEnvironmentLockPaths.get(checksum) ?? `urn:sha256:${checksum}`
           ])
         )
-  const environmentLockId = (checksum: string): string => environmentLockIds.get(checksum)!
+  const environmentLockId = (checksum: string): string | undefined =>
+    environmentLockIds.get(checksum)
   const payloadId =
     packagedDataPaths.get(evidence.version_id) ?? versionEntityId(evidence.version_id)
   const graph: RoCrateEntity[] = []
@@ -333,7 +334,8 @@ const buildArtifactVersionRoCrateMetadata = (
       instruments.push(reference(kernelId(run.kernelKind)))
     }
     if (run.environmentLock && run.environmentLock.state !== 'unavailable') {
-      instruments.push(reference(environmentLockId(run.environmentLock.lockChecksum)))
+      const lockId = environmentLockId(run.environmentLock.lockChecksum)
+      if (lockId) instruments.push(reference(lockId))
     }
     const objectIds = [
       ...new Set(

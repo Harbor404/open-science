@@ -323,10 +323,39 @@ describe('aggregate RO-Crate export', () => {
     })
   })
 
-  it('still exports versions with optional provenance evidence absent', () => {
-    const document = buildAggregateRoCrateMetadata(projectSource([artifactSource()]))
+  it('merges in-scope dependency identities when optional provenance is absent', () => {
+    const first = artifactSource(1)
+    const second = artifactSource(2, {
+      inputs: [
+        {
+          ordinal: 1,
+          input_file_version_id: first.evidence.version_id,
+          source_kind: 'artifact-version',
+          source_file_id: 'artifact-1',
+          source_version_number: first.evidence.version_number,
+          source_project_id: first.evidence.project_id,
+          source_session_id: first.evidence.app_session_id,
+          filename: 'dependency.csv',
+          content_type: 'text/csv',
+          size_bytes: first.evidence.size_bytes,
+          checksum: first.evidence.checksum,
+          storage_key: 'artifacts/project-1/artifact-1',
+          strongest_association: 'turn-attached'
+        }
+      ]
+    })
+
+    const document = buildAggregateRoCrateMetadata(projectSource([second, first]))
     expect(entity(document, './').conformsTo).toEqual({ '@id': PROJECT_LIGHTWEIGHT_PROFILE })
     expect(entity(document, 'artifacts/artifact-1/versions/version-1/')).toBeDefined()
+    expect(entity(document, `urn:open-science:version:${first.evidence.version_id}`)).toMatchObject(
+      {
+        '@type': 'File',
+        name: first.evidence.filename,
+        alternateName: ['dependency.csv'],
+        sha256: first.evidence.checksum
+      }
+    )
   })
 
   it('fails closed for invalid and cyclic input references', () => {
@@ -338,6 +367,28 @@ describe('aggregate RO-Crate export', () => {
     expect(() => buildAggregateRoCrateMetadata(sessionSource([invalid]))).toThrow(
       'unknown input reference'
     )
+
+    const conflicting = artifactSource(3, {
+      inputs: [
+        {
+          ordinal: 1,
+          input_file_version_id: 'conflicting-input',
+          source_kind: 'upload-version',
+          source_file_id: 'upload-conflicting',
+          source_version_number: 1,
+          source_project_id: 'project-1',
+          source_session_id: 'session-1',
+          filename: 'conflicting.csv',
+          size_bytes: 5,
+          checksum: '1'.repeat(64),
+          storage_key: 'uploads/conflicting',
+          strongest_association: 'turn-attached'
+        }
+      ]
+    })
+    expect(() =>
+      buildAggregateRoCrateMetadata(sessionSource([artifactSource(1), conflicting]))
+    ).toThrow('content checksum has conflicting sizes')
 
     const first = artifactSource(1, {
       inputs: [
