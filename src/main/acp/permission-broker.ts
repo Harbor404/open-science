@@ -156,6 +156,9 @@ const SESSION_ALLOW_OPTION_ID_PREFIX = 'open-science:allow-session:'
 const PROJECT_ALLOW_OPTION_ID_PREFIX = 'open-science:allow-project:'
 const GLOBAL_ALLOW_OPTION_ID_PREFIX = 'open-science:allow-global:'
 const FILE_TOOL_KINDS = new Set(['read', 'edit', 'delete', 'move'])
+// ACP kinds are not all provider tool names: e.g. an arbitrary native `move` must not become file
+// authority solely because the Registry also supports the ACP move operation.
+const FILE_PROVIDER_TOOLS = new Set(['read', 'write', 'edit', 'multiedit', 'notebookedit'])
 const NOTEBOOK_SERVER = 'open-science-notebook'
 const NOTEBOOK_EXECUTION_TOOLS = new Set(['notebook_execute', 'repl_execute', 'bash_execute'])
 // Depends on the codex-acp option-ID contract: persistent exec/network policy amendments are the only
@@ -669,7 +672,7 @@ const resolveCategoryKey = (
   if (
     toolCall.locations?.length ||
     (toolCall.kind && FILE_TOOL_KINDS.has(toolCall.kind)) ||
-    (providerToolName && capabilityFromLegacyCategory(`file:${providerToolName}`))
+    (providerToolName && FILE_PROVIDER_TOOLS.has(providerToolName.toLowerCase()))
   ) {
     const operation = providerToolName ?? toolCall.kind
     return operation ? `file:${operation}` : undefined

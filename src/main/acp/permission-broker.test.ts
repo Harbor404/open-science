@@ -2824,9 +2824,7 @@ it('reuses registered file grants for provider metadata aliases on every framewo
         'MultiEdit',
         'multiedit',
         'NotebookEdit',
-        'notebookedit',
-        'delete',
-        'move'
+        'notebookedit'
       ]) {
         const request = createToolPermissionRequest({ providerToolName: name })
         request.toolCall._meta = { toolName: name }
@@ -2834,11 +2832,18 @@ it('reuses registered file grants for provider metadata aliases on every framewo
           outcome: { outcome: 'selected', optionId: 'allow-once' }
         })
       }
+      for (const kind of ['read', 'edit', 'delete', 'move'] as const) {
+        await expect(
+          broker.requestPermission(createToolPermissionRequest({ kind }), context)
+        ).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'allow-once' } })
+      }
     }
     expect(emit).not.toHaveBeenCalled()
     // Neither display names nor a separate provider directory guard inherit a file grant.
     for (const request of [
       createToolPermissionRequest({ title: 'write' }),
+      createToolPermissionRequest({ providerToolName: 'delete' }),
+      createToolPermissionRequest({ providerToolName: 'move' }),
       createToolPermissionRequest({
         providerToolName: 'external_directory',
         kind: 'other',
