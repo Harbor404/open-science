@@ -125,7 +125,8 @@
     "src/renderer/src/pages/workspace/previews/LibraryChatButton.test.tsx",
     "src/renderer/src/pages/workspace/previews/library-reference-actions.ts",
     "src/renderer/src/pages/workspace/previews/LibraryInboxPreview.tsx",
-    "src/renderer/src/pages/workspace/previews/LibraryInboxPreview.test.tsx"
+    "src/renderer/src/pages/workspace/previews/LibraryInboxPreview.test.tsx",
+    "src/renderer/src/pages/workspace/previews/renderers/ManuscriptPreview.tsx"
   ],
   "interfacePaths": [
     "src/renderer/src/pages/workspace/previews/PreviewFallback.tsx",
@@ -285,7 +286,8 @@
       "src/renderer/src/pages/workspace/PermissionApprovalControls.interaction.test.tsx",
       "src/renderer/src/pages/workspace/PermissionApprovalControls.render.test.tsx",
       "src/renderer/src/pages/workspace/PermissionApprovalControls.specialist-delete.render.test.tsx",
-      "src/renderer/src/pages/workspace/PermissionApprovalControls.specialist-switch.render.test.tsx"
+      "src/renderer/src/pages/workspace/PermissionApprovalControls.specialist-switch.render.test.tsx",
+      "src/renderer/src/pages/workspace/manuscript-export.test.ts"
     ]
   },
   "capabilityOverlays": [],

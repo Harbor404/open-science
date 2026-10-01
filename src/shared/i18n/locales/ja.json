@@ -6683,6 +6683,10 @@
     "Your project edits have not been saved. Discard them and close the form?": "プロジェクトの変更は保存されていません。変更を破棄してフォームを閉じますか？",
     "Search is partially unavailable": "検索の一部を利用できません",
     "Messages, files and Library search are unavailable until saved conversations are ready. Projects and session titles may still appear.": "保存済みの会話の準備が整うまで、メッセージ、ファイル、ライブラリを検索できません。プロジェクトとセッションのタイトルは表示される場合があります。",
-    "Review recovery options": "復旧オプションを確認"
+    "Review recovery options": "復旧オプションを確認",
+    "Export manuscript as HTML": "原稿をHTMLでエクスポート",
+    "Export manuscript as PDF": "原稿をPDFでエクスポート",
+    "Export manuscript as DOCX": "原稿をDOCXでエクスポート",
+    "Preparing manuscript": "原稿を準備中"
   }
 }

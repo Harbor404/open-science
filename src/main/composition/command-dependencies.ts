@@ -6,6 +6,8 @@ import type { ApplicationInvocation } from '../application-command-router'
 import { createCliCommandOwner } from '../cli-install/ipc'
 import { createGithubCommandOwner } from '../github-ipc'
 import { createLiteratureCommandOwner } from '../literature/command-owner'
+import { createManuscriptCommandOwner } from '../manuscripts/command-owner'
+import { discoverQuarto } from '../manuscripts/quarto-discovery'
 import { errorLogFields } from '../logger'
 import { createLogsCommandOwner } from '../logs-ipc'
 import { ManagedFileVersionService } from '../managed-file-versions/service'
@@ -190,6 +192,26 @@ export function composeCommandDependencies({
       literatureCatalog: researchCatalog.literatureCatalog,
       literaturePdfImporter: researchCatalog.literaturePdfImporter,
       contentRepository: managedFiles.contentRepository
+    }),
+    manuscripts: createManuscriptCommandOwner({
+      discoverQuarto: () => discoverQuarto(),
+      resolveVersionDescriptors: (request) =>
+        managedFiles.artifactProvenanceRepository.resolveVersionDescriptors(request),
+      exportBibtex: async (itemIds) => {
+        const items = await researchCatalog.literatureCatalog.getMany(itemIds)
+        if (items.length !== itemIds.length) {
+          throw new Error('One or more manuscript bibliography items are unavailable.')
+        }
+        return researchCatalog.literatureCitationFormatter.exportReferences(
+          items.map(({ id, item }) => ({ id, item })),
+          'bibtex'
+        )
+      },
+      approve: async ({ sessionId, title, rawInput, signal }) => {
+        const runtime = runtimeRef.current
+        if (!runtime) return false
+        return runtime.requestAppApproval({ sessionId, title, rawInput, signal })
+      }
     }),
     memory: {
       snapshot: () => researchCatalog.memoryService.snapshot(),
