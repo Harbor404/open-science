@@ -2,8 +2,19 @@
 // notebook execution, or the Prisma schema, and they bind immutable manifests to message branches.
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { copyFile, lstat, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  stat
+} from 'node:fs/promises'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 
 import type { PersistedConversationGraph } from '../../shared/conversation-graph'
 import { readDurableJsonFile, writeDurableJsonFile } from '../storage/durable-json-file'
@@ -136,6 +147,27 @@ const sha256File = async (path: string): Promise<string> => {
 const isMissing = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
 
+// Resolve every existing symlink in the path while still allowing the final directories to be created
+// later. This keeps storage-containment checks based on the filesystem target, not the lexical path.
+const canonicalizePotentialPath = async (path: string): Promise<string> => {
+  const absolute = resolve(path)
+  try {
+    return await realpath(absolute)
+  } catch (error) {
+    if (!isMissing(error)) throw error
+    const info = await lstat(absolute).catch((lstatError: unknown) => {
+      if (isMissing(lstatError)) return undefined
+      throw lstatError
+    })
+    if (info?.isSymbolicLink()) {
+      return canonicalizePotentialPath(resolve(dirname(absolute), await readlink(absolute)))
+    }
+    const parent = dirname(absolute)
+    if (parent === absolute) return absolute
+    return join(await canonicalizePotentialPath(parent), basename(absolute))
+  }
+}
+
 const pathInside = (root: string, candidate: string): boolean => {
   const relativePath = relative(resolve(root), resolve(candidate))
   return relativePath === '' || (!relativePath.startsWith(`..${sep}`) && relativePath !== '..')
@@ -143,14 +175,19 @@ const pathInside = (root: string, candidate: string): boolean => {
 
 const toPosixPath = (path: string): string => path.split(sep).join('/')
 
-const assertBranchBinding = (
-  graph: PersistedConversationGraph,
-  branchId: string
-): WorkspaceCheckpointBinding => {
+const assertActiveMessageBranch = (graph: PersistedConversationGraph, branchId: string): void => {
   const activeFrame = graph.frames.find((frame) => frame.id === graph.activeFrameId)
   if (!activeFrame || activeFrame.activeBranchId !== branchId) {
     throw new Error('Workspace checkpoint requires the active Message Branch.')
   }
+}
+
+const assertBranchBinding = (
+  graph: PersistedConversationGraph,
+  branchId: string
+): WorkspaceCheckpointBinding => {
+  assertActiveMessageBranch(graph, branchId)
+  const activeFrame = graph.frames.find((frame) => frame.id === graph.activeFrameId)!
   const branch = graph.branches.find((candidate) => candidate.id === branchId)
   if (!branch || branch.agentFrameId !== activeFrame.id) {
     throw new Error(`Conversation branch not found: ${branchId}`)
@@ -616,7 +653,7 @@ const applyCheckpoint = async (
 }
 
 class WorkspaceCheckpointOwner {
-  private readonly checkpointRoot: string
+  private checkpointRoot: string
   private readonly maxBlobBytes: number
   private readonly now: () => number
   private readonly restoreHooks: WorkspaceCheckpointRestoreHooks
@@ -632,12 +669,15 @@ class WorkspaceCheckpointOwner {
     this.restoreHooks = options.restoreHooks ?? {}
   }
 
-  private assertWorkspaceSeparation(workspaceRoot: string): void {
-    if (pathInside(workspaceRoot, this.checkpointRoot)) {
+  private async assertWorkspaceSeparation(workspaceRoot: string): Promise<void> {
+    const canonicalWorkspaceRoot = await canonicalizePotentialPath(workspaceRoot)
+    const canonicalCheckpointRoot = await canonicalizePotentialPath(this.checkpointRoot)
+    if (pathInside(canonicalWorkspaceRoot, canonicalCheckpointRoot)) {
       throw new Error(
         'Workspace checkpoint storage must be outside the workspace containment root.'
       )
     }
+    this.checkpointRoot = canonicalCheckpointRoot
   }
 
   private async withLock<Result>(key: string, operation: () => Promise<Result>): Promise<Result> {
@@ -706,7 +746,7 @@ class WorkspaceCheckpointOwner {
 
   private async recoverJournalLocked(journal: WorkspaceCheckpointRestoreJournal): Promise<void> {
     const workspaceRoot = resolve(journal.workspaceRoot)
-    this.assertWorkspaceSeparation(workspaceRoot)
+    await this.assertWorkspaceSeparation(workspaceRoot)
     const checkpoint = await loadCheckpointById(
       this.checkpointRoot,
       journal.sessionId,
@@ -734,7 +774,7 @@ class WorkspaceCheckpointOwner {
     request: WorkspaceCheckpointCaptureRequest
   ): Promise<WorkspaceCheckpointRestorePreview> {
     const workspaceRoot = resolve(request.workspaceRoot)
-    this.assertWorkspaceSeparation(workspaceRoot)
+    await this.assertWorkspaceSeparation(workspaceRoot)
     return this.withLock(workspaceRoot, async () => {
       await this.recoverJournalsForSession(request.sessionId, workspaceRoot)
       const checkpoint = await this.loadBoundCheckpoint(request)
@@ -749,10 +789,11 @@ class WorkspaceCheckpointOwner {
       throw new Error('Workspace checkpoint restore requires explicit confirmation.')
     }
     const workspaceRoot = resolve(request.workspaceRoot)
-    this.assertWorkspaceSeparation(workspaceRoot)
+    await this.assertWorkspaceSeparation(workspaceRoot)
     return this.withLock(workspaceRoot, async () => {
       await this.recoverJournalsForSession(request.sessionId, workspaceRoot)
       const checkpoint = await this.loadBoundCheckpoint(request)
+      assertActiveMessageBranch(request.graph, request.branchId)
       const preview = await buildRestorePreview(checkpoint, workspaceRoot)
       if (preview.previewToken !== request.previewToken) {
         throw new Error('Workspace preview is stale; preview the restore again.')
@@ -813,7 +854,7 @@ class WorkspaceCheckpointOwner {
     request: WorkspaceCheckpointCaptureRequest & { trigger: WorkspaceCheckpointTrigger }
   ): Promise<WorkspaceCheckpointCaptureResult> {
     const workspaceRoot = resolve(request.workspaceRoot)
-    this.assertWorkspaceSeparation(workspaceRoot)
+    await this.assertWorkspaceSeparation(workspaceRoot)
     return this.withLock(workspaceRoot, async () => {
       await this.recoverJournalsForSession(request.sessionId, workspaceRoot)
       const binding = assertBranchBinding(request.graph, request.branchId)

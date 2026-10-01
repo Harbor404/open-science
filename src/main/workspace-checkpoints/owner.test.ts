@@ -1,4 +1,14 @@
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -408,7 +418,7 @@ describe('workspace checkpoint owner', () => {
     await expect(readFile(outside, 'utf8')).resolves.toBe('outside')
   })
 
-  it('previews a branch checkpoint after the conversation switches to a sibling branch', async () => {
+  it('previews a sibling branch checkpoint without restoring it to the active branch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'workspace-checkpoint-branch-switch-'))
     roots.push(root)
     const workspaceRoot = join(root, 'workspace')
@@ -466,6 +476,18 @@ describe('workspace checkpoint owner', () => {
     expect(preview.entries).toEqual([
       expect.objectContaining({ path: 'data.csv', change: 'modify' })
     ])
+
+    await expect(
+      owner.restore({
+        graph: sibling,
+        sessionId: 'session-1',
+        branchId: originalBranchId,
+        workspaceRoot,
+        previewToken: preview.previewToken,
+        confirm: true
+      })
+    ).rejects.toThrow(/active Message Branch/i)
+    await expect(readFile(join(workspaceRoot, 'data.csv'), 'utf8')).resolves.toBe('v2\n')
   })
 
   it('preserves the message-branch checkpoint binding through the session graph codec', async () => {
@@ -659,6 +681,34 @@ describe('workspace checkpoint owner', () => {
         workspaceRoot
       })
     ).rejects.toThrow(/outside the workspace/i)
+  })
+
+  it('refuses checkpoint storage symlinked into the workspace containment root', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'workspace-checkpoint-store-symlink-'))
+    roots.push(root)
+    const workspaceRoot = join(root, 'workspace')
+    const checkpointTarget = join(workspaceRoot, '.checkpoint-data')
+    const checkpointRoot = join(root, 'checkpoints')
+    await mkdir(workspaceRoot)
+    await writeFile(join(workspaceRoot, 'data.csv'), 'v1\n')
+    await symlink(checkpointTarget, checkpointRoot, 'dir')
+    const graph = createLinearConversationGraph({
+      sessionId: 'session-1',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1
+    })
+    const owner = new WorkspaceCheckpointOwner({ checkpointRoot })
+
+    await expect(
+      owner.checkpointTurnBoundary({
+        graph,
+        sessionId: 'session-1',
+        branchId: graph.branches[0].id,
+        workspaceRoot
+      })
+    ).rejects.toThrow(/outside the workspace/i)
+    await expect(lstat(checkpointTarget)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('marks missing referenced inputs as unavailable instead of planning an unsafe add', async () => {

@@ -10,9 +10,7 @@
   ],
   "consumerModules": [],
   "testFiles": {
-    "owner": [
-      "src/main/workspace-checkpoints/owner.test.ts"
-    ],
+    "owner": ["src/main/workspace-checkpoints/owner.test.ts"],
     "contract": [],
     "consumer": []
   },
