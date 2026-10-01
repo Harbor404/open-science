@@ -1555,6 +1555,12 @@ class AcpPermissionBroker {
         if (!persisted) this.releaseDurablePermissionSlot(stored)
       })
       void stored.durableReady.catch((error: unknown) => {
+        this.trace(stored, {
+          stage: 'decision',
+          authority: 'system',
+          reason: 'permission_settlement_failed',
+          outcome: 'cancelled'
+        })
         stored.durablePersistenceSettled = true
         if (this.pendingRequests.get(requestId) === stored) {
           this.pendingRequests.delete(requestId)

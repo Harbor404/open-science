@@ -3065,6 +3065,38 @@ it('records only permission anomalies without provider payloads or routine settl
   }
 })
 
+it('logs durable permission persistence failures without exposing storage error details', async () => {
+  const info = vi.fn()
+  const logger = mainLogger.createLogger('permission')
+  const logging = vi.spyOn(mainLogger, 'createLogger').mockReturnValue({ ...logger, info })
+  const error = new Error('private-storage-error')
+  const emit = vi.fn()
+  const broker = new AcpPermissionBroker(emit, undefined, undefined, undefined, {
+    persist: vi.fn().mockRejectedValue(error),
+    settleLive: vi.fn()
+  })
+  try {
+    await expect(
+      broker.requestPermission(createCodexExecutePermissionRequest('python private-script.py'), {
+        profile: 'ask',
+        frameworkId: 'codex',
+        projectId: 'project-1',
+        promptMessageId: 'prompt-1'
+      })
+    ).rejects.toBe(error)
+    expect(emit).not.toHaveBeenCalled()
+    expect(broker.getPendingRequests()).toEqual([])
+    expect(info).toHaveBeenCalledWith(
+      'permission decision trace',
+      expect.objectContaining({ reason: 'permission_settlement_failed', outcome: 'cancelled' })
+    )
+    expect(JSON.stringify(info.mock.calls)).not.toContain('private-')
+  } finally {
+    logging.mockRestore()
+    broker.cancelAllPending()
+  }
+})
+
 it('filters normal permission events before logging and retains fallback and failure evidence', () => {
   const logging = vi.spyOn(mainLogger, 'createLogger')
   const normal: Omit<PermissionDiagnostic, 'sessionId'>[] = [

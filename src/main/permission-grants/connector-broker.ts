@@ -204,7 +204,17 @@ class ConnectorPermissionBroker {
 
   async remember(request: ConnectorPermissionRequest, scope: PermissionGrantScope): Promise<void> {
     // Remembered authority must be durable before the current call is released.
-    await this.registry!.remember({ capability: request.capability, scope })
+    try {
+      await this.registry!.remember({ capability: request.capability, scope })
+    } catch (error) {
+      this.trace(request, {
+        stage: 'decision',
+        authority: 'human',
+        reason: 'permission_settlement_failed',
+        outcome: 'cancelled'
+      })
+      throw error
+    }
   }
 }
 
