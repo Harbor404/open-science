@@ -50,6 +50,10 @@ describe('LabArchives connector', () => {
     const signature = request.searchParams.get('sig')!
     expect(signature).toMatch(/^[A-Za-z0-9+/]+={0,2}$/)
     expect(signature).not.toContain('%')
+    const epochRequest = new URL(String(fetchImpl.mock.calls[0][0]))
+    expect(epochRequest.pathname).toBe('/api/utilities/epoch_time')
+    expect(epochRequest.searchParams.get('akid')).toBe('akid-test')
+    expect(epochRequest.searchParams.has('accessPassword')).toBe(false)
     expect(result).toEqual({
       notebooks: [{ id: '123.4', name: 'Lab Notebook', is_default: true }]
     })

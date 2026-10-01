@@ -115,9 +115,9 @@ const signedRequest = async (
 ): Promise<string> => {
   const credentials = credentialsFor(ctx)
   const baseUrl = credentials.apiBaseUrl || DEFAULT_BASE
-  const epoch = epochFrom(
-    await ctx.fetchText(`${baseUrl.replace(/\/$/, '')}/api/utilities/epoch_time`)
-  )
+  const epochUrl = new URL(`${baseUrl.replace(/\/$/, '')}/api/utilities/epoch_time`)
+  epochUrl.searchParams.set('akid', credentials.accessKeyId)
+  const epoch = epochFrom(await ctx.fetchText(epochUrl.toString()))
   const signed = buildLabArchivesSignedUrl(
     baseUrl,
     path,
