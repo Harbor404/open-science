@@ -82,6 +82,34 @@ describe('Session conversation intents', () => {
     expect(pendingSessionConversationCommands(before.id)).toEqual([pending[1]])
   })
 
+  it('captures a resume run before runtime transcript adoption', () => {
+    const before: PersistedChatSession = {
+      ...fixture(),
+      runtimeTranscriptOwner: undefined,
+      status: 'error',
+      resumeRecovery: {
+        kind: 'resume-required',
+        cause: 'app-restart',
+        promptMessageId: 'prompt-1'
+      }
+    }
+    const after: PersistedChatSession = {
+      ...before,
+      status: 'running',
+      activeRun: { promptMessageId: 'prompt-1', startedAt: 2 },
+      updatedAt: 2
+    }
+
+    captureSessionConversationIntents(before, after, 'resume-run')
+
+    const commands = pendingSessionConversationCommands(before.id)
+    expect(commands.map(({ kind }) => kind)).toEqual(['resume-run'])
+    expect(applySessionConversationCommands(before, commands).activeRun).toEqual({
+      promptMessageId: 'prompt-1',
+      startedAt: 2
+    })
+  })
+
   it('captures a fork before its branch selection', () => {
     const before = fixture()
     const root = before.conversationGraph!.frames[0]

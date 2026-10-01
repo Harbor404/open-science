@@ -873,7 +873,7 @@ class SessionPersistenceStateOwner {
           { projectId: latest.projectId, sessionId: latest.id },
           () => candidate
         )
-      : this.saveSession(candidate)
+      : this.saveSessionWithAuthority(candidate, {}, { taskRunCommit: false }, true)
   }
 
   async stageTaskCompletion(
@@ -1176,7 +1176,8 @@ class SessionPersistenceStateOwner {
   private async saveSessionWithAuthority(
     session: PersistedChatSession,
     options: MainSaveSessionOptions = {},
-    saveAuthority: SessionSaveAuthority = { taskRunCommit: false }
+    saveAuthority: SessionSaveAuthority = { taskRunCommit: false },
+    mainTurnAdmission = false
   ): Promise<PersistedChatSession> {
     this.options.assertMutable(session.projectId, session.id, 'save')
     const { projectId, id: sessionId } = session
@@ -1283,18 +1284,40 @@ class SessionPersistenceStateOwner {
     }
     if (authority) delete rendererOwnedSession.delegationPolicy
     if (authority) delete rendererOwnedSession.computeConcurrencyLimit
-    const permissionOwnedStatus =
-      authority?.runtimeContext?.permission?.state === 'pending'
-        ? 'waiting-permission'
-        : rendererOwnedSession.status === 'waiting-permission'
-          ? (authority?.status ?? 'idle')
-          : undefined
-    const mainOwnedStatus = permissionOwnedStatus
-      ? permissionOwnedStatus
-      : authority?.status === 'waiting-plan-approval' ||
-          rendererOwnedSession.status === 'waiting-plan-approval'
-        ? (authority?.status ?? 'idle')
-        : undefined
+    let conversationAuthority: PersistedChatSession | undefined
+    if (authority) {
+      if (options.conversationCommands?.length) {
+        try {
+          conversationAuthority = applySessionConversationCommands(
+            authority,
+            options.conversationCommands
+          )
+        } catch (error) {
+          if (!(error instanceof SessionConversationCommandDeferredError)) throw error
+          // The optimistic renderer graph must not bypass a command deferred by an active run.
+          // Preserve independent preference intent while the pending commands await settlement.
+          conversationAuthority = authority
+        }
+      } else if (
+        !mainTurnAdmission &&
+        (authority.activeRun || authority.resumeRecovery || authority.runtimeTranscriptLastRun)
+      ) {
+        // A passive renderer save cannot erase Main's live or recoverable runtime state.
+        conversationAuthority = authority
+      }
+    }
+    // Existing Session state belongs to Main even before runtime transcript adoption. Historical
+    // state remains readable, but later renderer saves cannot replace it. A first save with no
+    // authority still establishes the initial candidate. Only the validated Main turn-admission
+    // path may replace existing state here; this authority is private to renderer save options.
+    const stateAuthority =
+      mainTurnAdmission || !authority ? submittedSession : (conversationAuthority ?? authority)
+    const mainOwnedState = {
+      status: stateAuthority?.status ?? ('idle' as const),
+      error: stateAuthority?.error,
+      errorReportable: stateAuthority?.errorReportable,
+      resumeRecovery: stateAuthority?.resumeRecovery
+    }
     // Once Main has durable Session-details ownership, a stale whole-Session renderer save may
     // continue the transcript but cannot roll back generated/manual copy or its attempt/usage
     // record. New and legacy Sessions can still establish their initial fallback on the first save;
@@ -1310,9 +1333,25 @@ class SessionPersistenceStateOwner {
             sessionDetailsGeneration: authority.sessionDetailsGeneration
           }
         : undefined
-    const relayProjection = mergeMainOwnedRelayProjection(rendererOwnedSession, authority)
+    const commandProjection = conversationAuthority
+      ? {
+          conversationGraph: conversationAuthority.conversationGraph,
+          messages: conversationAuthority.messages,
+          activities: conversationAuthority.activities,
+          activityGroups: conversationAuthority.activityGroups,
+          activeRun: conversationAuthority.activeRun,
+          runtimeConversationCommandIds: conversationAuthority.runtimeConversationCommandIds,
+          pendingHistoryReplay: conversationAuthority.pendingHistoryReplay,
+          branchContextResetRequired: conversationAuthority.branchContextResetRequired
+        }
+      : {}
+    const relayProjection = mergeMainOwnedRelayProjection(
+      { ...rendererOwnedSession, ...commandProjection },
+      authority
+    )
     const mergedSession: PersistedChatSession = {
       ...rendererOwnedSession,
+      ...commandProjection,
       ...relayProjection,
       ...mainOwnedSessionDetails,
       ...(authority?.runtimeContext ? { runtimeContext: authority.runtimeContext } : {}),
@@ -1342,14 +1381,18 @@ class SessionPersistenceStateOwner {
           }
         : {}),
       ...(authority ? { computeConcurrencyLimit: authority.computeConcurrencyLimit } : {}),
-      ...(mainOwnedStatus ? { status: mainOwnedStatus } : {}),
+      ...mainOwnedState,
       // Merging unchanged Main-owned authority is storage maintenance, not conversation activity.
       // Preserve the newest real activity time so opening a lazily loaded Session cannot move it into
       // the Workspace Active section. The dedicated Specialist binding transaction remains an
       // explicit mutation and therefore advances the timestamp here.
       updatedAt: specialistBindingChanged
         ? Math.max(rendererOwnedSession.updatedAt, (authority?.updatedAt ?? -1) + 1, Date.now())
-        : Math.max(rendererOwnedSession.updatedAt, authority?.updatedAt ?? -1)
+        : Math.max(
+            rendererOwnedSession.updatedAt,
+            authority?.updatedAt ?? -1,
+            conversationAuthority?.updatedAt ?? -1
+          )
     }
 
     let materializedSession = materializeSessionConversationGraph(mergedSession)

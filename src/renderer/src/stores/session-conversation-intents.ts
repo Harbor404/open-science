@@ -17,8 +17,7 @@ export const captureSessionConversationIntents = (
   after: PersistedChatSession | undefined,
   runIntent: 'start-run' | 'resume-run' = 'start-run'
 ): void => {
-  if (!before || !after || before.runtimeTranscriptOwner !== 'main' || !after.conversationGraph)
-    return
+  if (!before || !after || !after.conversationGraph) return
   const previous = before.conversationGraph
   if (!previous) return
   const next = after.conversationGraph
