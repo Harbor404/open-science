@@ -1,6 +1,93 @@
-import { expect } from '@playwright/test'
+import { expect, test as nativeTest } from '@playwright/test'
+import { execFile } from 'node:child_process'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { release } from 'node:os'
+import { resolve } from 'node:path'
+import { promisify } from 'node:util'
 import type { Locator, Page } from 'playwright'
-import { test } from './fixtures/electron-app'
+import { electronLaunchTarget, launchEnvironment, test } from './fixtures/electron-app'
+import { terminateProcessTree } from '../src/main/process-tree'
+
+const execFileAsync = promisify(execFile)
+type ProcessPower = {
+  pid: number
+  priority: number
+  controlMask: number
+  stateMask: number
+  ecoQoS: boolean
+}
+type WindowProcessPower = { main: ProcessPower; renderer: ProcessPower }
+
+nativeTest(
+  'restores native renderer efficiency mode across window transitions @pr-mainline-windows',
+  async ({ browserName }, testInfo) => {
+    expect(browserName).toBe('chromium')
+    nativeTest.skip(
+      process.platform !== 'win32' || Number(release().split('.')[2]) < 22621,
+      'Native efficiency mode requires Windows 11 22H2 or later.'
+    )
+    nativeTest.setTimeout(240_000)
+    const storageRoot = testInfo.outputPath('storage')
+    const dataRoot = resolve(storageRoot, 'data')
+    const userDataRoot = testInfo.outputPath('electron-profile')
+    const evidencePath = testInfo.outputPath('windows-process-power.json')
+    await mkdir(dataRoot, { recursive: true })
+    await writeFile(
+      resolve(storageRoot, 'settings.json'),
+      JSON.stringify({
+        version: 2,
+        onboardingCompletedAt: 1,
+        dataRoot,
+        localePreference: 'en',
+        closePreference: 'minimize'
+      })
+    )
+    const target = electronLaunchTarget(userDataRoot)
+    const environment: Record<string, string> = {
+      ...launchEnvironment(storageRoot, undefined, process.env, undefined, 'normal'),
+      OPEN_SCIENCE_USER_DATA: userDataRoot,
+      OPEN_SCIENCE_POWER_EVIDENCE: evidencePath,
+      OPEN_SCIENCE_POWER_QUERY: resolve('e2e/fixtures/windows-process-power.ps1')
+    }
+    delete environment['ELECTRON_RUN_AS_NODE']
+    const executable =
+      target.executablePath ?? (createRequire(resolve('package.json'))('electron') as string)
+    // No debugger: Playwright's loader switches and CDP focus emulation prevent real backgrounding.
+    const running = execFileAsync(
+      executable,
+      ['--require', resolve('e2e/fixtures/windows-renderer-efficiency.cjs'), ...target.args],
+      { cwd: process.cwd(), env: environment, windowsHide: true, timeout: 210_000 }
+    )
+    try {
+      await running
+      const evidence = JSON.parse(await readFile(evidencePath, 'utf8')) as {
+        completed: boolean
+        phases: Record<string, WindowProcessPower & { backgroundThrottling: boolean }>
+      }
+      expect(evidence.completed).toBe(true)
+      expect(Object.keys(evidence.phases)).toEqual([
+        'visible',
+        'minimized',
+        'restored',
+        'tray',
+        'shown-from-tray',
+        'reloaded',
+        'minimized-after-reload'
+      ])
+      for (const phase of Object.values(evidence.phases))
+        expect(phase.backgroundThrottling).toBe(true)
+    } finally {
+      if (running.child.exitCode === null && running.child.signalCode === null) {
+        const result = await terminateProcessTree(running.child, 'SIGKILL')
+        expect(result.reaped, 'Native efficiency test process cleanup').toBe(true)
+      }
+      await testInfo
+        .attach('windows-process-power', { path: evidencePath, contentType: 'application/json' })
+        .catch(() => undefined)
+    }
+  }
+)
 
 const openGeneralSettings = async (page: Page): Promise<Locator> => {
   await page.getByRole('button', { name: 'Settings' }).click()
@@ -15,6 +102,11 @@ const openGeneralSettings = async (page: Page): Promise<Locator> => {
 test.describe('Windows window system', () => {
   test.skip(process.platform !== 'win32', 'Windows window behavior requires a Windows host.')
   test.use({ windowMode: 'normal' })
+
+  test.beforeEach(async ({ app }) => {
+    // These locators use English copy; the test host may use another system language.
+    await app.page.evaluate(() => window.api.locale.setPreference({ preference: 'en' }))
+  })
 
   test('uses interface scale steps for Windows plus aliases and reset shortcuts @pr-mainline-windows', async ({
     app

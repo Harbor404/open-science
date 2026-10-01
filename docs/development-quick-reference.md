@@ -35,4 +35,39 @@ Useful commands:
 
 Packaged output is written under `dist/`.
 
+## Windows efficiency mode
+
+On Windows 11, Electron/Chromium automatically lowers the priority of background UI renderer
+processes and enables EcoQoS when the application window is minimized or hidden. Showing or
+restoring the window returns its renderer to normal scheduling. Open-Science retains Electron's
+default `backgroundThrottling` behavior for its main window; no additional setting or native
+process controller is needed.
+
+To observe this, minimize Open-Science or choose **Minimize to tray** under **Settings → General →
+When closing the window**, then close the window. In Task Manager, expand Open-Science and inspect
+the child processes' **Status** column. Windows can display the green double-leaf **Efficiency mode**
+indicator for a qualifying child process and its application group. The foreground application does
+not need to keep a leaf visible. Appearance depends on the Windows version and process state.
+
+The main process and scientific execution processes retain their existing scheduling; hiding the
+interface does not pause research tasks. Hidden document-generation windows intentionally disable
+background throttling so that rendering can finish. No project/session migration, new persisted
+status, or saved efficiency preference is introduced.
+
+The Windows window-system E2E regression reads the real renderer priority and power-throttling
+flags on Windows 11 22H2 or later, covering minimize, tray hide, restoration, and reload. A test-only
+preloader drives the production window without attaching a debugger: Playwright's source-app
+loader disables backgrounding, and its CDP focus emulation keeps renderers foregrounded during
+ordinary UI tests. Measurements are attached to the test report as JSON.
+
+Run the regression with:
+
+```bash
+npm run build:e2e
+npx playwright test e2e/windows-window-system.spec.ts -g "renderer efficiency mode"
+```
+
+See Microsoft's [Task Manager efficiency-mode explanation](https://devblogs.microsoft.com/performance-diagnostics/reduce-process-interference-with-task-manager-efficiency-mode/)
+and Electron's [`backgroundThrottling` documentation](https://www.electronjs.org/docs/latest/api/structures/web-preferences).
+
 [README](../README.md)
