@@ -25,6 +25,10 @@ import {
 } from './permission-policy'
 import { initLogger, flushLogs } from '../logger'
 import * as mainLogger from '../logger'
+import {
+  logPermissionDiagnostic,
+  type PermissionDiagnostic
+} from '../permission-grants/diagnostics'
 import type { SessionPermissionRuntimeContext } from '../../shared/session-persistence'
 
 type EmittedPermissionRequest = Parameters<ConstructorParameters<typeof AcpPermissionBroker>[0]>[0]
@@ -2802,6 +2806,7 @@ it('reuses registered file grants for provider metadata aliases on every framewo
   const root = await mkdtemp(join(tmpdir(), 'permission-file-aliases-'))
   const client = createProjectDbClient(root)
   const emit = vi.fn()
+  const logging = vi.spyOn(mainLogger, 'createLogger')
   let broker: AcpPermissionBroker | undefined
   try {
     await migrateApplicationDatabase(client)
@@ -2839,6 +2844,7 @@ it('reuses registered file grants for provider metadata aliases on every framewo
       }
     }
     expect(emit).not.toHaveBeenCalled()
+    expect(logging.mock.calls.filter(([scope]) => scope === 'permission')).toEqual([])
     // Neither display names nor a separate provider directory guard inherit a file grant.
     for (const request of [
       createToolPermissionRequest({ title: 'write' }),
@@ -2861,6 +2867,7 @@ it('reuses registered file grants for provider metadata aliases on every framewo
       await expect(pending).resolves.toEqual({ outcome: { outcome: 'cancelled' } })
     }
   } finally {
+    logging.mockRestore()
     broker?.cancelAllPending()
     await client.$disconnect()
     await rm(root, { recursive: true, force: true })
@@ -2939,18 +2946,23 @@ it('classifies unmapped permissions across tools and framework routes without gr
     }
     expect(registry.resolve).not.toHaveBeenCalled()
     for (const projectId of [undefined, 'project-1']) {
+      const previousDecision = await lastDecision()
       const pending = broker.requestPermission(
         createToolPermissionRequest({ providerToolName: 'write' }),
         { profile: 'ask', projectId }
       )
       await vi.waitFor(() => expect(broker.getPendingRequests()).toHaveLength(1))
-      expect(await lastDecision()).toMatchObject({
-        reason: projectId ? 'grant_not_matched' : 'project_context_unavailable',
-        fallback: !projectId,
-        hasReportedToolName: true,
-        hasRawInput: false,
-        hasLocations: false
-      })
+      if (projectId) {
+        expect(await lastDecision()).toEqual(previousDecision)
+      } else {
+        expect(await lastDecision()).toMatchObject({
+          reason: 'project_context_unavailable',
+          fallback: true,
+          hasReportedToolName: true,
+          hasRawInput: false,
+          hasLocations: false
+        })
+      }
       broker.cancelAllPending()
       await pending
     }
@@ -2962,7 +2974,7 @@ it('classifies unmapped permissions across tools and framework routes without gr
   }
 })
 
-it('records permission fallback, automatic authority and settlement without provider payloads', async () => {
+it('records only permission anomalies without provider payloads or routine settlements', async () => {
   const root = await mkdtemp(join(tmpdir(), 'permission-decision-log-'))
   initLogger({ logDir: root, mirrorToConsole: false })
   const emitted: EmittedPermissionRequest[] = []
@@ -2998,6 +3010,26 @@ it('records permission fallback, automatic authority and settlement without prov
     )
     await broker.respond({ requestId: emitted[1].requestId, optionId: 'reject-once' })
     await mapped
+    const registry = { resolve: vi.fn(async () => undefined) } as unknown as PermissionGrantRegistry
+    const managedBroker = new AcpPermissionBroker(vi.fn(), undefined, registry)
+    for (const context of permissionRoutes) {
+      for (const optionId of ['allow-once', 'reject-once', undefined]) {
+        const managed = managedBroker.requestPermission(
+          createToolPermissionRequest({ providerToolName: 'Write' }),
+          { ...context, projectId: 'project-1' }
+        )
+        await vi.waitFor(() => expect(managedBroker.getPendingRequests()).toHaveLength(1))
+        if (optionId) {
+          await managedBroker.respond({
+            requestId: managedBroker.getPendingRequests()[0].requestId,
+            optionId
+          })
+        } else {
+          managedBroker.cancelAllPending()
+        }
+        await managed
+      }
+    }
     await flushLogs()
     const contents = await readFile(join(root, 'main.log'), 'utf8')
     const events = contents
@@ -3006,40 +3038,74 @@ it('records permission fallback, automatic authority and settlement without prov
       .map((line) => JSON.parse(line))
       .filter((record) => record.scope === 'permission')
       .map((record) => record.data)
-    expect(events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          stage: 'decision',
-          modelRoute: 'codex-bridge',
-          authority: 'human',
-          fallback: true,
-          reason: 'native_tool_unsupported',
-          outcome: 'approval_required'
-        }),
-        expect.objectContaining({
-          stage: 'decision',
-          frameworkId: 'claude-code',
-          fallback: true,
-          reason: 'registry_unavailable',
-          capabilityKind: 'file_operation',
-          outcome: 'approval_required'
-        }),
-        expect.objectContaining({ stage: 'settlement', authority: 'human', outcome: 'rejected' }),
-        expect.objectContaining({
-          stage: 'decision',
-          modelRoute: 'codex-responses',
-          authority: 'automatic_policy',
-          reason: 'full_access',
-          outcome: 'allowed'
-        })
-      ])
-    )
+    expect(events).toEqual([
+      expect.objectContaining({
+        stage: 'decision',
+        modelRoute: 'codex-bridge',
+        authority: 'human',
+        fallback: true,
+        reason: 'native_tool_unsupported',
+        outcome: 'approval_required'
+      }),
+      expect.objectContaining({
+        stage: 'decision',
+        frameworkId: 'claude-code',
+        fallback: true,
+        reason: 'registry_unavailable',
+        capabilityKind: 'file_operation',
+        outcome: 'approval_required'
+      })
+    ])
     expect(new Set(events.map((event) => event.toolCallRef)).size).toBe(1)
     expect(contents).not.toContain('private-')
   } finally {
     broker.cancelAllPending()
     await flushLogs()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('filters normal permission events before logging and retains fallback and failure evidence', () => {
+  const logging = vi.spyOn(mainLogger, 'createLogger')
+  const normal: Omit<PermissionDiagnostic, 'sessionId'>[] = [
+    { stage: 'request' },
+    { stage: 'decision', authority: 'registry_grant', outcome: 'allowed' },
+    { stage: 'decision', authority: 'automatic_policy', outcome: 'allowed' },
+    { stage: 'decision', authority: 'legacy_session', outcome: 'allowed' },
+    { stage: 'decision', authority: 'restored_once', outcome: 'allowed' },
+    { stage: 'decision', authority: 'connector_policy', outcome: 'rejected' },
+    { stage: 'decision', authority: 'human', fallback: false, reason: 'grant_not_matched' },
+    { stage: 'settlement', authority: 'human', outcome: 'allowed' },
+    { stage: 'settlement', authority: 'human', outcome: 'rejected' },
+    { stage: 'settlement', authority: 'system', outcome: 'cancelled' },
+    { stage: 'context', fallback: false, reason: 'context_ready' },
+    { stage: 'context', fallback: false, reason: 'context_cancelled' },
+    { stage: 'profile', fallback: true, reason: 'provider_interception_unavailable' }
+  ]
+  const anomalies: Omit<PermissionDiagnostic, 'sessionId'>[] = [
+    { stage: 'decision', fallback: true, reason: 'registry_unavailable' },
+    { stage: 'decision', fallback: true, reason: 'approval_unavailable' },
+    { stage: 'decision', fallback: true, reason: 'allow_once_unavailable' },
+    { stage: 'context', fallback: true, reason: 'context_timeout' },
+    { stage: 'decision', reason: 'permission_settlement_failed', outcome: 'cancelled' }
+  ]
+  try {
+    for (const event of normal) logPermissionDiagnostic({ sessionId: 'session', ...event })
+    expect(logging).not.toHaveBeenCalled()
+    const info = vi.fn()
+    logging.mockReturnValue({ ...mainLogger.createLogger('permission'), info })
+    logging.mockClear()
+    for (const event of anomalies) logPermissionDiagnostic({ sessionId: 'session', ...event })
+    expect(info).toHaveBeenCalledTimes(anomalies.length)
+    for (const [index, event] of anomalies.entries()) {
+      expect(info).toHaveBeenNthCalledWith(
+        index + 1,
+        'permission decision trace',
+        expect.objectContaining(event)
+      )
+    }
+  } finally {
+    logging.mockRestore()
   }
 })
 

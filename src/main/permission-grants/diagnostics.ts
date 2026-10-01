@@ -43,6 +43,13 @@ const fingerprint = (value: string): string =>
   createHash('sha256').update(value).digest('hex').slice(0, 16)
 
 const logPermissionDiagnostic = (event: PermissionDiagnostic): void => {
+  // Filter before creating a logger: debug levels can still mirror events to the console.
+  // Native profile configuration and ordinary approvals/rejections are not anomalies.
+  if (!(
+    (event.fallback === true && (event.stage === 'decision' || event.stage === 'context')) ||
+    (event.stage === 'decision' && event.reason === 'permission_settlement_failed')
+  ))
+    return
   try {
     const {
       sessionId,

@@ -49,7 +49,18 @@ it('preserves an unfamiliar operation failure through real logging, rotation, re
     outcome: 'approval_required',
     authority: 'human'
   })
+  for (const authority of ['registry_grant', 'human', 'automatic_policy'] as const) {
+    logPermissionDiagnostic({
+      stage: 'decision',
+      sessionId: 'session',
+      authority,
+      fallback: false,
+      outcome: 'allowed',
+      reason: 'normal_permission_canary'
+    })
+  }
   await flushLogs()
+  expect(await readFile(join(logDir, 'main.log'), 'utf8')).not.toContain('normal_permission_canary')
   // Force exactly one rotation with a record that fits alone but exceeds the remaining file space.
   log.info('rotation boundary', { reason: 'x'.repeat(3600) })
   await flushLogs()
@@ -90,7 +101,7 @@ it('preserves an unfamiliar operation failure through real logging, rotation, re
     'loader.js:42:7'
   ])
     expect(exported).toContain(retained)
-  for (const excluded of ['diagnostic-secret-123', '/opt/private-user'])
+  for (const excluded of ['diagnostic-secret-123', '/opt/private-user', 'normal_permission_canary'])
     expect(exported).not.toContain(excluded)
   expect(await readFile(join(logDir, 'main.1.log'), 'utf8')).toBe(before)
   const manifest = JSON.parse(await readFile(join(extracted, 'manifest.json'), 'utf8'))
