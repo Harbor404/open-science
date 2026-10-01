@@ -470,20 +470,6 @@ class AcpPermissionContext {
     }
     const executionMethod = notebookExecutionMethod(trustedMcpToolIdentity(normalizedParams))
 
-    // Keep the audit record useful without logging titles, URLs, raw input, or provider payloads.
-    const toolName = extractProviderToolName(normalizedParams.toolCall)
-    const isMcp =
-      isMcpToolName(normalizedParams.toolCall.title, mcpServerNames) ||
-      isMcpToolName(toolName, mcpServerNames)
-    log.info('permission request received', {
-      tool:
-        this.toolIdentityForDiagnostics(toolName, appSessionId) ?? normalizedParams.toolCall.kind,
-      isMcp,
-      toolCallId: normalizedParams.toolCall.toolCallId,
-      sessionId: params.sessionId,
-      optionCount: params.options.length
-    })
-
     try {
       if (reviewerContext) {
         const response = routing.resolveReviewerPermission(normalizedParams)
