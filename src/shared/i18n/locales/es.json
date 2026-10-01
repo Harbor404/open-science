@@ -7011,6 +7011,10 @@
     "Your project edits have not been saved. Discard them and close the form?": "Los cambios del proyecto no se han guardado. ¿Desea descartarlos y cerrar el formulario?",
     "Search is partially unavailable": "La búsqueda no está disponible por completo",
     "Messages, files and Library search are unavailable until saved conversations are ready. Projects and session titles may still appear.": "No se pueden buscar mensajes, archivos ni en la biblioteca hasta que las conversaciones guardadas estén listas. Los proyectos y los títulos de las sesiones pueden seguir apareciendo.",
-    "Review recovery options": "Revisar opciones de recuperación"
+    "Review recovery options": "Revisar opciones de recuperación",
+    "Allow write to external system of record?": "¿Permitir la escritura en el sistema de registro externo?",
+    "The agent wants to call a connector tool that mutates an external system of record. Review the exact arguments and approve only if you intend to make this change.": "El agente quiere llamar a una herramienta de conector que modifica un sistema de registro externo. Revise los argumentos exactos y apruebe solo si desea realizar este cambio.",
+    "Lab systems": "Sistemas de laboratorio",
+    "Electronic lab notebooks and lab data systems": "Notebooks electrónicos de laboratorio y sistemas de datos de laboratorio"
   }
 }
