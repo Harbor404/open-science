@@ -831,7 +831,8 @@ export class JobPoller {
           return
         }
         try {
-          if (!(await directSshDriver.cancel({ job: current, handle, connection }))) {
+          const cancellation = await directSshDriver.cancel({ job: current, handle, connection })
+          if (!cancellation.confirmed) {
             if (signal.aborted) return
             await this._recordTimeoutTerminationUnconfirmed(current)
             return

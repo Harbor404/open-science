@@ -194,12 +194,15 @@ class ComputeJobCancellationReaper {
       const connection = await this.connectionBroker.acquire(job.provider_id, {
         intent: 'job_cleanup'
       })
-      if (!handle) {
-        handle = (await driver.recover({ job, connection })) ?? null
-        if (handle) await this.jobs.recordCancellationHandle(job.job_id, JSON.stringify(handle))
+      const cancellation = await driver.cancel({ job, handle, connection })
+      if (cancellation.recoveredHandle) {
+        await this.jobs.recordCancellationHandle(
+          job.job_id,
+          JSON.stringify(cancellation.recoveredHandle)
+        )
       }
-      if (await driver.cancel({ job, handle, connection })) {
-        await this.confirm(claim)
+      if (cancellation.confirmed) {
+        await this.confirm(claim, cancellation.remoteWorkdirAbsent === true)
         return
       }
       await this.scheduleRetry(

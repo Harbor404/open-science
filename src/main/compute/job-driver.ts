@@ -38,6 +38,12 @@ export type DriverCancelContext<Handle extends ComputeRemoteHandle = ComputeRemo
   connection: ComputeConnectionLease
 }
 
+export type DriverCancelResult<Handle extends ComputeRemoteHandle = ComputeRemoteHandle> = {
+  confirmed: boolean
+  remoteWorkdirAbsent?: boolean
+  recoveredHandle?: Handle
+}
+
 export interface ComputeJobDriver<
   Handle extends ComputeRemoteHandle = ComputeRemoteHandle,
   Observation = unknown
@@ -50,7 +56,7 @@ export interface ComputeJobDriver<
     connection: ComputeConnectionLease,
     options?: DriverPollOptions
   ): Promise<Map<string, Observation>>
-  cancel(context: DriverCancelContext<Handle>): Promise<boolean>
+  cancel(context: DriverCancelContext<Handle>): Promise<DriverCancelResult<Handle>>
 }
 
 export const createComputeJobDriver = (

@@ -1,18 +1,27 @@
 import { describe, expect, it } from 'vitest'
 
+import type { ComputeHost } from '../../shared/compute'
 import {
   UnsupportedSchedulerDriverError,
   computeJobDriverId,
   resolveComputeDriverId
 } from './job-driver'
 
-const host = (executionMode: 'auto' | 'direct_ssh' | 'slurm', detectedScheduler?: 'slurm' | 'pbs' | 'lsf' | 'none') =>
-  ({
-    executionMode,
-    probeResult: detectedScheduler
-      ? { ok: true, probedAt: '2026-09-01T00:00:00.000Z', exitCode: 0, errorTail: null, detectedScheduler }
-      : undefined
-  })
+const host = (
+  executionMode: 'auto' | 'direct_ssh' | 'slurm',
+  detectedScheduler?: 'slurm' | 'pbs' | 'lsf' | 'none'
+): Pick<ComputeHost, 'executionMode' | 'probeResult'> => ({
+  executionMode,
+  probeResult: detectedScheduler
+    ? {
+        ok: true,
+        probedAt: '2026-09-01T00:00:00.000Z',
+        exitCode: 0,
+        errorTail: null,
+        detectedScheduler
+      }
+    : undefined
+})
 
 describe('compute driver selection', () => {
   it('auto-selects Slurm from the existing probe result', () => {

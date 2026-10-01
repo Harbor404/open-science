@@ -123,7 +123,7 @@ describe('Slurm lifecycle boundaries', () => {
     )
 
     expect(script).toContain('#SBATCH --partition=gpu')
-    expect(script).toContain('#SBATCH --time=7200')
+    expect(script).toContain('#SBATCH --time=120')
     expect(script).toContain('#SBATCH --cpus-per-task=4')
     expect(script).toContain('#SBATCH --mem=8192M')
     expect(script).toContain('#SBATCH --gres=gpu:1')

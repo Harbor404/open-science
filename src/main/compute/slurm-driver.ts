@@ -10,6 +10,7 @@ import { applyComputeEnvironment } from './compute-environment'
 import type {
   ComputeJobDriver,
   DriverCancelContext,
+  DriverCancelResult,
   DriverPollEntry,
   DriverRecoveryContext,
   DriverSubmitContext
@@ -236,7 +237,7 @@ const resourceDirectives = (
     requested.push({
       field: 'walltimeSeconds',
       option: '--time',
-      directive: `#SBATCH --time=${resources.walltimeSeconds}`
+      directive: `#SBATCH --time=${Math.ceil(resources.walltimeSeconds / 60)}`
     })
   }
   if (resources.cpus !== undefined) {
@@ -653,8 +654,20 @@ export class SlurmDriver implements ComputeJobDriver<SlurmRemoteHandle, SlurmObs
     )
   }
 
-  async cancel({ handle, connection }: DriverCancelContext<SlurmRemoteHandle>): Promise<boolean> {
-    return handle?.driver === 'slurm' ? cancelSlurmJob(handle, connection) : false
+  async cancel({
+    job,
+    handle,
+    connection
+  }: DriverCancelContext<SlurmRemoteHandle>): Promise<DriverCancelResult<SlurmRemoteHandle>> {
+    if (handle?.driver === 'slurm') {
+      return { confirmed: await cancelSlurmJob(handle, connection) }
+    }
+    const recoveredHandle = await recoverSlurmJob(job, connection)
+    if (!recoveredHandle) return { confirmed: false }
+    return {
+      confirmed: await cancelSlurmJob(recoveredHandle, connection),
+      recoveredHandle
+    }
   }
 }
 

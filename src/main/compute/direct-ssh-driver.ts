@@ -11,6 +11,7 @@ import { parsePollOutput } from './job-poll-output'
 import type {
   ComputeJobDriver,
   DriverCancelContext,
+  DriverCancelResult,
   DriverPollEntry,
   DriverPollOptions,
   DriverRecoveryContext,
@@ -219,28 +220,32 @@ export class DirectSshDriver implements ComputeJobDriver<RemoteHandle, DirectPol
     job,
     handle: initialHandle,
     connection
-  }: DriverCancelContext<RemoteHandle>): Promise<boolean> {
+  }: DriverCancelContext<RemoteHandle>): Promise<DriverCancelResult<RemoteHandle>> {
     let handle = initialHandle
+    let recoveredHandle: RemoteHandle | undefined
     if (!handle && job.remote_workdir) {
       const observation = await probeRemoteLaunch(connection, job.remote_workdir)
       if (observation.kind === 'running') {
         handle = observation.handle
-      } else if (
-        observation.kind === 'not_started' ||
-        observation.kind === 'exited' ||
-        observation.kind === 'vanished'
-      ) {
-        return true
+        recoveredHandle = observation.handle
+      } else if (observation.kind === 'not_started') {
+        return { confirmed: true, remoteWorkdirAbsent: true }
+      } else if (observation.kind === 'exited' || observation.kind === 'vanished') {
+        return { confirmed: true }
       } else {
-        return false
+        return { confirmed: false }
       }
     }
-    if (!handle) return false
+    if (!handle) return { confirmed: false }
 
     const ownership = await probeRemoteJobProcessOwnership(handle.pid, handle.workdir, connection)
-    if (ownership === 'mismatch' || ownership === 'absent') return true
-    if (ownership !== 'owned') return false
-    return terminateRemoteJobProcessIfOwned(handle.pid, handle.workdir, connection)
+    const result = (confirmed: boolean): DriverCancelResult<RemoteHandle> => ({
+      confirmed,
+      ...(recoveredHandle ? { recoveredHandle } : {})
+    })
+    if (ownership === 'mismatch' || ownership === 'absent') return result(true)
+    if (ownership !== 'owned') return result(false)
+    return result(await terminateRemoteJobProcessIfOwned(handle.pid, handle.workdir, connection))
   }
 
   private async recoverAmbiguousRemoteLaunch(
