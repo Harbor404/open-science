@@ -6,7 +6,7 @@ import { dirname } from 'node:path'
 import { mkdir, readFile, readdir, realpath, stat, symlink, writeFile } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import { c as createTar, x as extractTar } from 'tar'
-import { fileChecksum, packageEntry } from './archive'
+import { fileChecksum, packageEntry, readPackageArchive } from './archive'
 import { ProjectRepository } from '../projects/repository'
 import { migrateApplicationDatabase } from '../projects/prisma-client'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -2613,6 +2613,70 @@ it('imports both immutable Artifact Versions and keeps original evidence distinc
   expect(copiedVersions).toHaveLength(2)
   expect(copiedVersions.every((version) => version.state === 'pending')).toBe(true)
   await expect(migrateApplicationDatabase(target.client)).resolves.toBeDefined()
+})
+
+it('exports duplicate Artifact Version bytes as one self-contained object', async () => {
+  const source = await createProvenanceTestFixture()
+  initDataRoot(source.storageRoot)
+  const target = await createProvenanceTestFixture()
+  initDataRoot(target.storageRoot)
+  fixtures.push(source, target)
+  await source.client.project.create({ data: { id: 'project-1', name: 'Research' } })
+  await new SessionRepository(source.storageRoot).saveSession({
+    id: 'session-1',
+    projectId: 'project-1',
+    title: 'Duplicate history',
+    cwd: '',
+    status: 'idle',
+    messages: [],
+    createdAt: 1,
+    updatedAt: 2
+  })
+  const payload = 'identical artifact bytes'
+  await source.stagePng(payload, 'first.png')
+  const first = await source.repository.createVersion(
+    createArtifactVersionRequest({ filename: 'first.png' })
+  )
+  await source.stagePng(payload, 'second.png')
+  const second = await source.repository.createVersion(
+    createArtifactVersionRequest({
+      filename: 'second.png',
+      writeOperationId: 'write-2',
+      writeRequestChecksum: 'b'.repeat(64)
+    })
+  )
+  const archive = join(source.storageRoot, 'deduplicated.science')
+  await new SessionPackageService({
+    storageRoot: source.storageRoot,
+    getClient: async () => source.client
+  }).exportTo({ projectId: 'project-1', sessionId: 'session-1' }, archive)
+
+  const expanded = join(source.storageRoot, 'deduplicated')
+  const manifest = await readPackageArchive(archive, expanded)
+  const rows = await source.client.artifactVersion.findMany({
+    where: { id: { in: [first.versionId, second.versionId] } },
+    select: { contentStorageKey: true, checksum: true }
+  })
+  const contentStorageKeys = new Set(rows.map((row) => row.contentStorageKey))
+  const entries = manifest.inventory.filter(
+    (entry) => entry.storageKey && contentStorageKeys.has(entry.storageKey)
+  )
+  expect(manifest.requiredFeatures).toContain('content-dedupe')
+  expect(entries).toHaveLength(2)
+  expect(new Set(entries.map((entry) => entry.path))).toHaveLength(1)
+  expect(new Set(entries.map((entry) => entry.checksum))).toEqual(
+    new Set(rows.map((row) => row.checksum))
+  )
+
+  const importer = new SessionPackageService({
+    storageRoot: target.storageRoot,
+    getClient: async () => target.client
+  })
+  const imported = await importer.importFrom(archive)
+  const history = await importer.readOrigin(imported)
+  expect(history.files.map((file) => file.sourceStorageKey)).toEqual(
+    expect.arrayContaining([...contentStorageKeys])
+  )
 })
 
 it.each(['pdf-context', 'pdf-annotation', 'text-annotation', 'image-annotation'] as const)(
