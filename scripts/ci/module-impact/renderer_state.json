@@ -501,7 +501,8 @@
       "src/renderer/src/pages/literature/list/LiteratureFilters.render.test.tsx",
       "src/renderer/src/pages/workspace/previews/LibraryInboxPreview.test.tsx",
       "src/renderer/src/pages/literature/literature-localization.render.test.tsx",
-      "src/renderer/src/pages/workspace/manuscript-export.test.ts"
+      "src/renderer/src/pages/workspace/manuscript-export.test.ts",
+      "src/renderer/src/components/WindowsTitleBar.test.tsx"
     ]
   },
   "capabilityOverlays": [],
