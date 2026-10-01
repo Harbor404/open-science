@@ -2815,6 +2815,15 @@ it('records permission fallback, automatic authority and settlement without prov
       frameworkId: 'codex',
       modelRoute: 'codex-responses'
     })
+    const mapped = broker.requestPermission(
+      {
+        ...params,
+        toolCall: { ...params.toolCall, kind: 'edit', _meta: { toolName: 'Write' } }
+      },
+      { profile: 'ask', frameworkId: 'claude-code' }
+    )
+    await broker.respond({ requestId: emitted[1].requestId, optionId: 'reject-once' })
+    await mapped
     await flushLogs()
     const contents = await readFile(join(root, 'main.log'), 'utf8')
     const events = contents
@@ -2831,6 +2840,14 @@ it('records permission fallback, automatic authority and settlement without prov
           authority: 'human',
           fallback: true,
           reason: 'capability_unmapped',
+          outcome: 'approval_required'
+        }),
+        expect.objectContaining({
+          stage: 'decision',
+          frameworkId: 'claude-code',
+          fallback: true,
+          reason: 'registry_unavailable',
+          capabilityKind: 'file_operation',
           outcome: 'approval_required'
         }),
         expect.objectContaining({ stage: 'settlement', authority: 'human', outcome: 'rejected' }),

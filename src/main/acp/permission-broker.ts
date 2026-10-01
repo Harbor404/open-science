@@ -1348,6 +1348,8 @@ class AcpPermissionBroker {
       automaticRequest,
       policyContext,
       categoryKey,
+      capability,
+      projectId: policyContext?.projectId,
       providerAllowOnceOptionId: providerAllowOnceOption?.optionId,
       durableCandidate
     })
