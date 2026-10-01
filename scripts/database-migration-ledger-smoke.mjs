@@ -188,6 +188,10 @@ const EXPECTED_MIGRATION_LEDGER = [
   {
     id: '0046_journal_attributes',
     checksum: '6faaa28accbf9297ba56586f0fa647adfca287a92d2bed7b08218323142d0992'
+  },
+  {
+    id: '0047_scheduler_walltime',
+    checksum: '5cb4a675bc2ad9bc4f2255383d667a532dee8091e6b62f974b6bada6b9e1abf0'
   }
 ]
 const LEGACY_PROJECT_ID = 'package-smoke-legacy-project'
