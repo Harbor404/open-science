@@ -24,7 +24,8 @@ import {
   type DepositProvider,
   type DepositProviderId,
   type DepositReconciliation,
-  type DepositReconciliationRequest
+  type DepositReconciliationRequest,
+  type ProviderPublishedDeposit
 } from './deposit-provider'
 
 export type { ArtifactDepositSource } from './deposit-provider'
@@ -34,7 +35,11 @@ export type ArtifactDepositSourceReader = {
 }
 
 export type ArtifactPublicationStore = {
-  findByVersion(versionId: string): Promise<ArtifactPublication | undefined>
+  findByVersion(
+    versionId: string,
+    provider?: DepositProviderId,
+    environment?: DepositEnvironment
+  ): Promise<ArtifactPublication | undefined>
   findLatestForArtifact(
     artifactId: string,
     provider: DepositProviderId,
@@ -78,6 +83,7 @@ export type ArtifactDepositOwner = {
 
 const SAFE_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u
 const PUBLICATION_ROOT = 'artifact-publications'
+const TEMPORARY_SUFFIX = '.tmp'
 
 const assertSafeSegment = (value: string, label: string): string => {
   if (!SAFE_SEGMENT_PATTERN.test(value)) throw new Error(`Invalid ${label}: ${value}`)
@@ -167,13 +173,18 @@ const parsePublication = (raw: unknown): ArtifactPublication => {
   }
 }
 
-const publicationPath = (root: string, artifact: ArtifactDepositReference): string =>
+const publicationPath = (
+  root: string,
+  publication: Pick<ArtifactPublication, 'artifact' | 'provider' | 'environment'>
+): string =>
   join(
     root,
     PUBLICATION_ROOT,
-    assertSafeSegment(artifact.projectId, 'project id'),
-    assertSafeSegment(artifact.artifactId, 'artifact id'),
-    `${assertSafeSegment(artifact.versionId, 'artifact version id')}.json`
+    assertSafeSegment(publication.artifact.projectId, 'project id'),
+    assertSafeSegment(publication.artifact.artifactId, 'artifact id'),
+    assertSafeSegment(publication.provider, 'deposit provider'),
+    assertSafeSegment(publication.environment, 'deposit environment'),
+    `${assertSafeSegment(publication.artifact.versionId, 'artifact version id')}.json`
   )
 
 const walkFiles = async (directory: string): Promise<string[]> => {
@@ -188,7 +199,7 @@ const walkFiles = async (directory: string): Promise<string[]> => {
   for (const entry of entries) {
     const path = join(directory, entry.name)
     if (entry.isDirectory()) files.push(...(await walkFiles(path)))
-    else if (entry.isFile()) files.push(path)
+    else if (entry.isFile() && !entry.name.endsWith(TEMPORARY_SUFFIX)) files.push(path)
   }
   return files
 }
@@ -206,12 +217,18 @@ export const createFileArtifactPublicationStore = (options: {
     }
   }
   return {
-    findByVersion: async (versionId) => {
+    findByVersion: async (versionId, provider, environment) => {
       assertSafeSegment(versionId, 'artifact version id')
       const files = await walkFiles(join(root, PUBLICATION_ROOT))
       for (const file of files) {
         const publication = await read(file)
-        if (publication?.artifact.versionId === versionId) return publication
+        if (
+          publication?.artifact.versionId === versionId &&
+          (!provider || publication.provider === provider) &&
+          (!environment || publication.environment === environment)
+        ) {
+          return publication
+        }
       }
       return undefined
     },
@@ -233,14 +250,14 @@ export const createFileArtifactPublicationStore = (options: {
       return latest
     },
     save: async (publication) => {
-      const path = publicationPath(root, publication.artifact)
+      const path = publicationPath(root, publication)
       await mkdir(dirname(path), { recursive: true })
-      const temporary = `${path}.${randomUUID()}.tmp`
-      await writeFile(temporary, `${JSON.stringify(publication, null, 2)}\n`, {
-        encoding: 'utf8',
-        mode: 0o600
-      })
+      const temporary = `${path}.${randomUUID()}${TEMPORARY_SUFFIX}`
       try {
+        await writeFile(temporary, `${JSON.stringify(publication, null, 2)}\n`, {
+          encoding: 'utf8',
+          mode: 0o600
+        })
         await rename(temporary, path)
       } catch (error) {
         await rm(temporary, { force: true })
@@ -277,6 +294,15 @@ const publicationFor = (input: {
   ...(input.result.landingUrl ? { landingUrl: input.result.landingUrl } : {}),
   depositedAt: input.depositedAt.toISOString()
 })
+
+const assertPublicationLineage = (
+  preview: ArtifactDepositPreview,
+  result: Pick<ProviderPublishedDeposit, 'conceptDoi'>
+): void => {
+  if (preview.lineage && result.conceptDoi !== preview.lineage.conceptDoi) {
+    throw new DepositLineageMismatchError(preview.lineage.conceptDoi, result.conceptDoi)
+  }
+}
 
 const lineageFrom = (
   publication: ArtifactPublication | undefined
@@ -352,6 +378,23 @@ export const createArtifactDepositOwner = (
         throw new DepositPreviewStaleError()
       }
 
+      const existing = await options.publicationStore.findByVersion(
+        preview.artifact.versionId,
+        preview.provider,
+        preview.environment
+      )
+      if (existing) {
+        if (
+          existing.artifact.checksum !== preview.artifact.checksum ||
+          existing.crate.checksum !== preview.files[0].checksum
+        ) {
+          throw new DepositPreviewStaleError(
+            'Published artifact metadata does not match the approved preview.'
+          )
+        }
+        return existing
+      }
+
       const request: PrepareArtifactDepositRequest = {
         artifact: {
           projectId: preview.artifact.projectId,
@@ -383,9 +426,7 @@ export const createArtifactDepositOwner = (
         source,
         token
       })
-      if (current.lineage && result.conceptDoi !== current.lineage.conceptDoi) {
-        throw new DepositLineageMismatchError(current.lineage.conceptDoi, result.conceptDoi)
-      }
+      assertPublicationLineage(current, result)
       const publication = publicationFor({ preview: current, source, result, depositedAt: now() })
       await options.publicationStore.save(publication)
       return publication
@@ -402,6 +443,27 @@ export const createArtifactDepositOwner = (
       ) {
         throw new DepositPreviewStaleError('Reconciliation does not match the approved preview.')
       }
+      const suppliedDraft = depositPreviewWithoutChecksum(preview)
+      if (depositPreviewChecksum(suppliedDraft) !== preview.previewChecksum) {
+        throw new DepositPreviewStaleError('Reconciliation preview checksum is invalid.')
+      }
+      const source = await readSource({
+        projectId: preview.artifact.projectId,
+        sessionId: preview.artifact.sessionId,
+        artifactId: preview.artifact.artifactId,
+        versionId: preview.artifact.versionId
+      })
+      const current = options.providers[preview.provider].preview({
+        source,
+        environment: preview.environment,
+        ...(preview.lineage ? { lineage: preview.lineage } : {})
+      })
+      if (
+        depositPreviewChecksum(current) !== preview.previewChecksum ||
+        canonicalDepositJson(current) !== canonicalDepositJson(suppliedDraft)
+      ) {
+        throw new DepositPreviewStaleError('Artifact source changed before reconciliation.')
+      }
       const token = await options.credentials.getAccessToken({
         provider: preview.provider,
         environment: preview.environment
@@ -415,12 +477,7 @@ export const createArtifactDepositOwner = (
         token
       })
       if (reconciliation.state !== 'published') return reconciliation
-      const source = await readSource({
-        projectId: preview.artifact.projectId,
-        sessionId: preview.artifact.sessionId,
-        artifactId: preview.artifact.artifactId,
-        versionId: preview.artifact.versionId
-      })
+      assertPublicationLineage(preview, reconciliation.publication)
       const publication = publicationFor({
         preview,
         source,

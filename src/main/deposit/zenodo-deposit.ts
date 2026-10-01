@@ -313,52 +313,52 @@ export const createZenodoDepositProvider = (
         environment: preview.environment,
         previewChecksum
       }
-      const draftRaw = await performMutation(
+      const draft = await performMutation(
         { ...reconciliationBase, operation: 'create-draft' },
         async () => {
-          if (preview.lineage) {
-            return latestDraftUrl({
-              fetchImpl,
-              raw: await jsonRequest({
+          const draftRaw = preview.lineage
+            ? await latestDraftUrl({
                 fetchImpl,
-                url: `${base}/deposit/depositions/${preview.lineage.providerRecordId}/actions/newversion`,
-                method: 'POST',
+                raw: await jsonRequest({
+                  fetchImpl,
+                  url: `${base}/deposit/depositions/${preview.lineage.providerRecordId}/actions/newversion`,
+                  method: 'POST',
+                  token,
+                  timeoutMs,
+                  signal,
+                  context: 'Zenodo new-version creation'
+                }),
                 token,
                 timeoutMs,
-                signal,
-                context: 'Zenodo new-version creation'
-              }),
-              token,
-              timeoutMs,
-              signal
-            })
+                signal
+              })
+            : {
+                url: `${base}/deposit/depositions`,
+                raw: await createDraft({
+                  fetchImpl,
+                  base,
+                  token,
+                  preview,
+                  timeoutMs,
+                  signal
+                })
+              }
+          const draft = depositDraft(draftRaw.raw, 'Zenodo draft')
+          if (!draft.bucket || !draft.publish) {
+            throw new DepositProviderError('Zenodo draft did not include upload and publish links')
           }
-          return {
-            url: `${base}/deposit/depositions`,
-            raw: await createDraft({
-              fetchImpl,
-              base,
-              token,
-              preview,
-              timeoutMs,
-              signal
-            })
+          if (
+            preview.lineage?.conceptDoi &&
+            draft.conceptDoi &&
+            draft.conceptDoi !== preview.lineage.conceptDoi
+          ) {
+            throw new DepositProviderError(
+              'Zenodo draft concept DOI does not match the artifact lineage'
+            )
           }
+          return draft
         }
       )
-      const draft = depositDraft(draftRaw.raw, 'Zenodo draft')
-      if (!draft.bucket || !draft.publish) {
-        throw new DepositProviderError('Zenodo draft did not include upload and publish links')
-      }
-      if (
-        preview.lineage?.conceptDoi &&
-        draft.conceptDoi &&
-        draft.conceptDoi !== preview.lineage.conceptDoi
-      ) {
-        throw new DepositProviderError(
-          'Zenodo draft concept DOI does not match the artifact lineage'
-        )
-      }
 
       await performMutation(
         {
@@ -449,12 +449,22 @@ export const createZenodoDepositProvider = (
         })
         if (!fileMatches) continue
         try {
-          return { state: 'published', publication: parseZenodoDeposit(record) }
+          const publication = parseZenodoDeposit(record)
+          if (preview.lineage && publication.conceptDoi !== preview.lineage.conceptDoi) {
+            return {
+              state: 'pending',
+              detail: 'Matching Zenodo record has a different concept DOI.'
+            }
+          }
+          return { state: 'published', publication }
         } catch {
           return { state: 'pending', detail: 'Matching Zenodo record has no published DOI yet.' }
         }
       }
-      return { state: 'not-found' }
+      return {
+        state: 'pending',
+        detail: 'No matching published Zenodo record is visible yet.'
+      }
     }
   }
 }

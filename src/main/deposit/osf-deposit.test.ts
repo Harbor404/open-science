@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { ArtifactDepositSource } from './artifact-deposit-owner'
-import { completeDepositPreview } from './deposit-provider'
+import { completeDepositPreview, DepositOutcomeUnknownError } from './deposit-provider'
 import { createOsfDepositProvider, parseOsfDeposit, toOsfRegistration } from './osf-deposit'
 
 const source = (): ArtifactDepositSource => ({
@@ -159,5 +159,82 @@ describe('OSF deposit provider', () => {
         }
       })
     ).toThrow(/DOI/)
+  })
+
+  it('fails closed with an unknown outcome and reconciles through the project when OSF omits the DOI', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        json({
+          data: {
+            id: 'node-1',
+            type: 'nodes',
+            links: {
+              files: 'https://api.test.osf.io/v2/nodes/node-1/files/',
+              registrations: 'https://api.test.osf.io/v2/nodes/node-1/registrations/'
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        json({
+          data: {
+            id: 'file-1',
+            type: 'files',
+            links: {
+              upload: 'https://files.test.osf.io/v1/resources/node-1/providers/osfstorage/file-1'
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(json({ data: { id: 'file-1' } }))
+      .mockResolvedValueOnce(
+        json({
+          data: {
+            id: 'registration-1',
+            type: 'registrations',
+            attributes: { title: 'Climate analysis' },
+            links: { html: 'https://osf.io/abcde/' }
+          }
+        })
+      )
+    const provider = createOsfDepositProvider({ fetchImpl })
+    const preview = completeDepositPreview(
+      provider.preview({ source: source(), environment: 'sandbox' })
+    )
+
+    const executeError = await provider
+      .execute({ preview, source: source(), token: 'osf-secret-token' })
+      .catch((error: unknown) => error)
+    expect(executeError).toBeInstanceOf(DepositOutcomeUnknownError)
+    expect(executeError).toMatchObject({
+      reconciliation: {
+        operation: 'create-registration',
+        providerRecordId: 'node-1'
+      }
+    })
+
+    fetchImpl.mockResolvedValueOnce(
+      json({
+        data: [
+          {
+            id: 'registration-1',
+            type: 'registrations',
+            attributes: { title: 'Climate analysis' },
+            links: { html: 'https://osf.io/abcde/' }
+          }
+        ]
+      })
+    )
+    await expect(
+      provider.reconcile({
+        preview,
+        outcome: (executeError as DepositOutcomeUnknownError).reconciliation,
+        token: 'osf-secret-token'
+      })
+    ).resolves.toMatchObject({ state: 'pending' })
+    expect(fetchImpl.mock.calls[4]![0]).toBe(
+      'https://api.test.osf.io/v2/nodes/node-1/registrations/'
+    )
   })
 })

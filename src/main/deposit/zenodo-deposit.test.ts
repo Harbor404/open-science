@@ -255,11 +255,31 @@ describe('Zenodo deposit provider', () => {
       (_input, init) =>
         new Promise((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('The operation was aborted', 'AbortError'))
+            reject(
+              init.signal?.reason ?? new DOMException('The operation was aborted', 'AbortError')
+            )
           )
         })
     )
     const provider = createZenodoDepositProvider({ fetchImpl, requestTimeoutMs: 5 })
+    const preview = completeDepositPreview(
+      provider.preview({ source: source(), environment: 'sandbox' })
+    )
+
+    await expect(
+      provider.execute({ preview, source: source(), token: 'secret-token' })
+    ).rejects.toMatchObject({
+      name: 'DepositOutcomeUnknownError',
+      reconciliation: { operation: 'create-draft', providerRecordId: undefined }
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports an unknown outcome when a successful mutation response cannot be parsed', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('not-json', { status: 201 }))
+    const provider = createZenodoDepositProvider({ fetchImpl })
     const preview = completeDepositPreview(
       provider.preview({ source: source(), environment: 'sandbox' })
     )

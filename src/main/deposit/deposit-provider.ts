@@ -217,7 +217,10 @@ export class DepositOutcomeUnknownError extends Error {
 }
 
 export class DepositProviderError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly httpStatus?: number
+  ) {
     super(message)
     this.name = 'DepositProviderError'
   }
@@ -254,10 +257,14 @@ export const depositPreviewWithoutChecksum = (
   return draft
 }
 
-export const redactDepositError = (error: unknown, token?: string): DepositProviderError => {
+export const redactDepositError = (
+  error: unknown,
+  token?: string,
+  httpStatus?: number
+): DepositProviderError => {
   const raw = error instanceof Error ? error.message : String(error)
   const withoutToken = token ? raw.split(token).join('[redacted]') : raw
-  return new DepositProviderError(redactSensitiveText(withoutToken))
+  return new DepositProviderError(redactSensitiveText(withoutToken), httpStatus)
 }
 
 const isAbortError = (error: unknown): boolean =>
@@ -266,7 +273,8 @@ const isAbortError = (error: unknown): boolean =>
 const isUnknownMutationOutcome = (error: unknown): boolean =>
   isAbortError(error) ||
   (error instanceof TypeError && /fetch|network|socket|connection/i.test(error.message)) ||
-  (error instanceof DepositProviderError && /HTTP 5\d\d/u.test(error.message))
+  (error instanceof DepositProviderError &&
+    (error.httpStatus === undefined || error.httpStatus < 400 || error.httpStatus >= 500))
 
 export const mutationUnknownError = (input: {
   provider: DepositProviderId
@@ -314,13 +322,14 @@ export const responseJson = async (
     const body = await response.text().catch(() => '')
     throw redactDepositError(
       new Error(`${context} failed with HTTP ${response.status}${body ? `: ${body}` : ''}`),
-      token
+      token,
+      response.status
     )
   }
   try {
     return await response.json()
   } catch {
-    throw redactDepositError(new Error(`${context} returned invalid JSON`), token)
+    throw redactDepositError(new Error(`${context} returned invalid JSON`), token, response.status)
   }
 }
 
@@ -343,6 +352,17 @@ export const fetchWithTimeout = async (
   }
   try {
     return await fetchImpl(input, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const reason = controller.signal.reason
+      const aborted = new Error(
+        reason instanceof Error ? reason.message : 'deposit request aborted',
+        { cause: error }
+      )
+      aborted.name = 'AbortError'
+      throw aborted
+    }
+    throw error
   } finally {
     clearTimeout(timeout)
     signal?.removeEventListener('abort', abortFromCaller)

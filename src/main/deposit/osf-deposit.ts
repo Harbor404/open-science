@@ -155,6 +155,19 @@ const links = (raw: unknown, context: string): JsonObject => {
   return object(record.links, `${context} links`)
 }
 
+const registrationTitle = (record: JsonObject): string | undefined => {
+  const attributes =
+    record.attributes == null ? undefined : object(record.attributes, 'OSF registration attributes')
+  const responses =
+    attributes?.registration_responses == null
+      ? undefined
+      : object(attributes.registration_responses, 'OSF registration responses')
+  return (
+    (attributes ? text(attributes.title) : undefined) ??
+    (responses ? text(responses.title) : undefined)
+  )
+}
+
 export const parseOsfDeposit = (raw: unknown): ProviderPublishedDeposit => {
   const record = dataObject(raw, 'OSF registration')
   const attributes =
@@ -196,48 +209,53 @@ export const createOsfDepositProvider = (
       const { preview, source, token, signal } = input
       const api = bases[preview.environment]
       const registration = preview.providerMetadata
-      const projectRaw = await performMutation(
+      const project = await performMutation(
         {
           provider: 'osf',
           environment: preview.environment,
           operation: 'create-project',
           previewChecksum: preview.previewChecksum
         },
-        () =>
-          jsonRequest({
-            fetchImpl,
-            url: `${api}/nodes/`,
-            method: 'POST',
-            token,
-            timeoutMs,
-            signal,
-            context: 'OSF project creation',
-            body: {
-              data: {
-                type: 'nodes',
-                attributes: {
-                  title: preview.metadata.title,
-                  description: relatedDescription(source),
-                  category: 'project',
-                  public: false
+        async () => {
+          const project = dataObject(
+            await jsonRequest({
+              fetchImpl,
+              url: `${api}/nodes/`,
+              method: 'POST',
+              token,
+              timeoutMs,
+              signal,
+              context: 'OSF project creation',
+              body: {
+                data: {
+                  type: 'nodes',
+                  attributes: {
+                    title: preview.metadata.title,
+                    description: relatedDescription(source),
+                    category: 'project',
+                    public: false
+                  }
                 }
               }
-            }
-          })
+            }),
+            'OSF project'
+          )
+          const projectId = text(project.id)
+          const projectLinks =
+            project.links == null ? undefined : object(project.links, 'OSF project links')
+          const filesUrl = projectLinks ? text(projectLinks.files) : undefined
+          const registrationsUrl = projectLinks ? text(projectLinks.registrations) : undefined
+          if (!projectId || !filesUrl || !registrationsUrl) {
+            throw new DepositProviderError(
+              'OSF project response did not include file and registration links'
+            )
+          }
+          return { projectId, filesUrl, registrationsUrl }
+        }
       )
-      const project = dataObject(projectRaw, 'OSF project')
-      const projectId = text(project.id)
-      const projectLinks =
-        project.links == null ? undefined : object(project.links, 'OSF project links')
-      const filesUrl = projectLinks ? text(projectLinks.files) : undefined
-      const registrationsUrl = projectLinks ? text(projectLinks.registrations) : undefined
-      if (!projectId || !filesUrl || !registrationsUrl) {
-        throw new DepositProviderError(
-          'OSF project response did not include file and registration links'
-        )
-      }
+      const { projectId, filesUrl, registrationsUrl } = project
 
-      const fileRaw = await performMutation(
+      const file = await performMutation(
         {
           provider: 'osf',
           environment: preview.environment,
@@ -245,8 +263,8 @@ export const createOsfDepositProvider = (
           previewChecksum: preview.previewChecksum,
           providerRecordId: projectId
         },
-        () =>
-          jsonRequest({
+        async () => {
+          const fileRaw = await jsonRequest({
             fetchImpl,
             url: `${filesUrl.replace(/\/$/u, '')}/osfstorage/`,
             method: 'POST',
@@ -261,10 +279,13 @@ export const createOsfDepositProvider = (
               }
             }
           })
+          const uploadUrl = text(links(dataObject(fileRaw, 'OSF file'), 'OSF file').upload)
+          if (!uploadUrl) {
+            throw new DepositProviderError('OSF file response did not include an upload URL')
+          }
+          return uploadUrl
+        }
       )
-      const uploadUrl = text(links(dataObject(fileRaw, 'OSF file'), 'OSF file').upload)
-      if (!uploadUrl)
-        throw new DepositProviderError('OSF file response did not include an upload URL')
       await performMutation(
         {
           provider: 'osf',
@@ -276,7 +297,7 @@ export const createOsfDepositProvider = (
         async () => {
           const response = await fetchWithTimeout(
             fetchImpl,
-            uploadUrl,
+            file,
             {
               method: 'PUT',
               headers: headers(token, preview.files[0].contentType),
@@ -322,22 +343,37 @@ export const createOsfDepositProvider = (
         }
       )
     },
-    reconcile: async ({ outcome, token, signal }) => {
-      if (!outcome.providerRecordId) return { state: 'not-found' as const }
+    reconcile: async ({ preview, outcome, token, signal }) => {
+      if (outcome.operation !== 'create-registration' || !outcome.providerRecordId) {
+        return { state: 'not-found' as const }
+      }
       const raw = await jsonRequest({
         fetchImpl,
-        url: `${bases[outcome.environment]}/registrations/${outcome.providerRecordId}/`,
+        url: `${bases[outcome.environment]}/nodes/${encodeURIComponent(outcome.providerRecordId)}/registrations/`,
         method: 'GET',
         token,
         timeoutMs,
         signal,
         context: 'OSF registration reconciliation'
       })
-      try {
-        return { state: 'published', publication: parseOsfDeposit(raw) }
-      } catch {
-        return { state: 'pending', detail: 'OSF registration is not published yet.' }
+      const envelope = object(raw, 'OSF registration list')
+      const candidates = Array.isArray(envelope.data) ? envelope.data : []
+      if (!candidates.length) {
+        return {
+          state: 'pending',
+          detail: 'OSF has not exposed a registration for the project yet.'
+        }
       }
+      for (const candidate of candidates) {
+        const record = object(candidate, 'OSF registration')
+        if (registrationTitle(record) !== preview.metadata.title) continue
+        try {
+          return { state: 'published', publication: parseOsfDeposit({ data: record }) }
+        } catch {
+          // A matching registration can exist before OSF makes its DOI available.
+        }
+      }
+      return { state: 'pending', detail: 'OSF registration is not published yet.' }
     }
   }
 }
