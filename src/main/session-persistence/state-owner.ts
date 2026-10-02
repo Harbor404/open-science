@@ -1,8 +1,12 @@
-import { rebaseTaskSessionBinding, rebaseTaskTurnOntoLatestSession } from './task-admission'
+import { preserveMainTurnOutcomes, recordRestartTurnOutcome } from './turn-outcome-authority'
 import {
-  applySessionConversationCommands,
-  SessionConversationCommandDeferredError
-} from '../../shared/session-conversation-command'
+  setTurnOutcome,
+  legacySessionStateForOutcome,
+  type TurnOutcome
+} from '../../shared/session-persistence'
+import { SessionPromptPreparationOwner } from './prompt-preparation-owner'
+import { rebaseTaskSessionBinding, rebaseTaskTurnOntoLatestSession } from './task-admission'
+import { SessionConversationCommandDeferredError } from '../../shared/session-conversation-command'
 import { applyRuntimeSessionEvents } from '../../shared/runtime-session-projection'
 import { createHash, randomUUID } from 'node:crypto'
 
@@ -43,6 +47,14 @@ import { loadSessionMutationAuthority as loadAuthority } from './repository'
 import { saveSessionWithRevision, SessionProjectionAfterCommitError } from './save-session'
 import { isDeepStrictEqual } from 'node:util'
 import { preserveImportedSession } from './imported-session'
+import type { AcpRuntimeEvent } from '../../shared/acp'
+
+export type RuntimeTerminalCommitRequest = Readonly<{
+  projectId: string
+  sessionId: string
+  promptMessageId: string
+  executionId: string
+}>
 
 type SessionMetadata = Readonly<Pick<PersistedChatSession, 'id' | 'projectId' | 'title'>>
 
@@ -53,6 +65,8 @@ type SessionMetadataSnapshot = Readonly<{
 
 type SessionSaveAuthority = Readonly<{
   taskRunCommit: boolean
+  // Ends with the IPC caller lease that issued the save; preparation receipts follow it.
+  callerSignal?: AbortSignal
 }>
 
 type PatchSessionRuntimeContextCommand = Readonly<{
@@ -90,6 +104,7 @@ type SessionStateRepository = {
     | { status: 'unreadable' }
   >
   hasLiveRuntimeSession?(projectId: string, sessionId: string): boolean
+  retainRuntimeSessionState?(projectId: string, sessionId: string, retained: boolean): void
   saveSession(
     session: PersistedChatSession,
     expectedRevision?: number
@@ -120,6 +135,8 @@ type SessionPersistenceStateOwnerOptions = {
   notifyRuntimeContextSessionUpdated(session: PersistedChatSession): void
   notifyRuntimeTranscriptSessionUpdated?(session: PersistedChatSession): void
   notifyDelegationPolicyUpdated?(session: PersistedChatSession): void
+  // Schedules abandoned-preparation release on the Session's operation lane.
+  releaseAbandonedPreparation?(scope: { projectId: string; sessionId: string }): void
   provenance?: SessionStateProvenance
   uploads?: SessionStateUploads
   log: Logger
@@ -277,10 +294,107 @@ const validateFinalizedArtifactBindings = async (
 // Owns scheduled Session reads/writes and their in-memory projections. The coordinator calls this
 // module only from inside the operation scheduler's matching Project/Session lane.
 class SessionPersistenceStateOwner {
+  private readonly promptPreparations = new SessionPromptPreparationOwner()
+  // Ephemeral release facts never enter mutation authority or Session JSON. The original terminal
+  // remains owned by its runtime until explicit Retry commits it or a new admission supersedes it.
+  private readonly runtimeTerminalFailures = new Map<
+    string,
+    {
+      event: AcpRuntimeEvent
+      retry: () => Promise<void>
+      waitForWriteRelease?: () => Promise<void>
+    }
+  >()
   private readonly validatedBindingTopologies = new Map<string, string>()
   private sessionMetadata = new Map<string, SessionMetadata>()
   private isSessionMetadataComplete = false
   constructor(private readonly options: SessionPersistenceStateOwnerOptions) {}
+  recordRuntimeTerminalFailure(
+    event: AcpRuntimeEvent,
+    retry: () => Promise<void>,
+    waitForWriteRelease?: () => Promise<void>
+  ): void {
+    if (
+      !event.terminalScope ||
+      !event.sessionId ||
+      !event.promptMessageId ||
+      !event.terminalCommitFailure
+    )
+      throw new Error('Runtime terminal release requires exact execution authority.')
+    this.runtimeTerminalFailures.set(event.sessionId, {
+      event: structuredClone(event),
+      retry,
+      waitForWriteRelease
+    })
+    this.options.repository.retainRuntimeSessionState?.(
+      event.terminalScope.projectId,
+      event.sessionId,
+      true
+    )
+  }
+
+  listRuntimeTerminalFailures(): AcpRuntimeEvent[] {
+    return [...this.runtimeTerminalFailures.values()].map(({ event }) => structuredClone(event))
+  }
+  assertRuntimeTerminalWriteAvailable(sessionId: string): Promise<void> | undefined {
+    return this.runtimeTerminalFailures.get(sessionId)?.waitForWriteRelease?.()
+  }
+
+  projectRuntimeSession(session: PersistedChatSession): PersistedChatSession {
+    const failure = this.runtimeTerminalFailures.get(session.id)
+    const event = failure?.event
+    const scope = event?.terminalScope
+    if (!event || !scope || session.projectId !== scope.projectId) return session
+    const run = session.activeRun
+    if (
+      !run ||
+      run.promptMessageId !== event.promptMessageId ||
+      run.startedAt !== scope.startedAt
+    ) {
+      return session
+    }
+    const admission = session.runtimeSessionAdmissions?.find(
+      ({ executionId }) => executionId === scope.executionId
+    )
+    if (
+      !admission ||
+      admission.promptMessageId !== event.promptMessageId ||
+      admission.agentFrameId !== scope.agentFrameId ||
+      admission.messageBranchId !== scope.messageBranchId ||
+      admission.runtimeSegmentId !== scope.runtimeSegmentId
+    ) {
+      return session
+    }
+    return applyRuntimeSessionEvents(
+      session,
+      {
+        promptMessageId: event.promptMessageId!,
+        agentFrameId: scope.agentFrameId,
+        messageBranchId: scope.messageBranchId,
+        runtimeSegmentId: scope.runtimeSegmentId
+      },
+      [event]
+    )
+  }
+
+  async retryRuntimeTerminalCommit(request: RuntimeTerminalCommitRequest): Promise<void> {
+    const failure = this.runtimeTerminalFailures.get(request.sessionId)
+    if (
+      !failure ||
+      failure.event.promptMessageId !== request.promptMessageId ||
+      failure.event.terminalScope?.projectId !== request.projectId ||
+      failure.event.terminalScope.executionId !== request.executionId
+    )
+      return
+    // Retry calls the runtime's mutation lane; never invoke it while holding that same lane.
+    await failure.retry()
+    if (this.runtimeTerminalFailures.get(request.sessionId) === failure)
+      this.clearRuntimeTerminalFailure(request.projectId, request.sessionId)
+  }
+  private clearRuntimeTerminalFailure(projectId: string, sessionId: string): void {
+    this.runtimeTerminalFailures.delete(sessionId)
+    this.options.repository.retainRuntimeSessionState?.(projectId, sessionId, false)
+  }
   beginHydration(): void {
     this.validatedBindingTopologies.clear()
   }
@@ -315,6 +429,16 @@ class SessionPersistenceStateOwner {
     this.sessionMetadata = nextMetadata
   }
   recordSession(session: PersistedChatSession): void {
+    this.promptPreparations.observe(session)
+    // Clear stale live release facts when durable state settles or a newer execution takes over.
+    const event = this.runtimeTerminalFailures.get(session.id)?.event
+    if (
+      event &&
+      (!session.activeRun ||
+        session.activeRun.promptMessageId !== event.promptMessageId ||
+        session.activeRun.startedAt !== event.terminalScope?.startedAt)
+    )
+      this.clearRuntimeTerminalFailure(session.projectId, session.id)
     this.sessionMetadata.set(session.id, {
       id: session.id,
       projectId: session.projectId,
@@ -325,10 +449,17 @@ class SessionPersistenceStateOwner {
     this.isSessionMetadataComplete = false
   }
   removeSession(projectId: string, sessionId: string): void {
+    this.promptPreparations.forget(projectId, sessionId)
+    this.clearRuntimeTerminalFailure(projectId, sessionId)
     this.sessionMetadata.delete(sessionId)
     this.invalidateBindingTopology(projectId, sessionId)
   }
   removeProject(projectId: string, sessionIds: readonly string[]): void {
+    this.promptPreparations.forget(projectId)
+    for (const { event } of this.runtimeTerminalFailures.values()) {
+      if (event.terminalScope?.projectId === projectId && event.sessionId)
+        this.clearRuntimeTerminalFailure(projectId, event.sessionId)
+    }
     for (const [sessionId, metadata] of this.sessionMetadata) {
       if (metadata.projectId === projectId) this.sessionMetadata.delete(sessionId)
     }
@@ -438,11 +569,29 @@ class SessionPersistenceStateOwner {
       )
     )
 
-    const durableSession: PersistedChatSession = {
+    let durableSession: PersistedChatSession = {
       ...session,
       ...(sessionStatus ? { status: sessionStatus } : {}),
       runtimeContext,
       updatedAt: Math.max(session.updatedAt + 1, Date.now())
+    }
+    const rejectedPlan = runtimeContext.plan
+    if (
+      rejectedPlan?.approval === 'rejected' &&
+      current.plan?.approval !== 'rejected' &&
+      rejectedPlan.artifactVersionId === current.plan?.artifactVersionId &&
+      rejectedPlan.originatingPromptMessageId
+    ) {
+      const outcome: TurnOutcome = {
+        kind: 'cancelled',
+        settledAt: durableSession.updatedAt,
+        recovery: 'resume'
+      }
+      durableSession = {
+        ...setTurnOutcome(durableSession, rejectedPlan.originatingPromptMessageId, outcome),
+        ...legacySessionStateForOutcome(outcome, rejectedPlan.originatingPromptMessageId),
+        activeRun: undefined
+      }
     }
     if (planHistoryProjections) durableSession.planHistoryProjections = planHistoryProjections
     else delete durableSession.planHistoryProjections
@@ -691,18 +840,47 @@ class SessionPersistenceStateOwner {
     }
   }
 
+  ownsPromptPreparation(session: PersistedChatSession): boolean {
+    return this.promptPreparations.ownsPreparation(session)
+  }
+
+  // A renderer that reloads or crashes between prepare-prompt and sendPrompt takes its preparation
+  // id with it, so nobody can roll back. Release through restart semantics: undo only fields still
+  // equal to the marker's expectation, keep saved messages and concurrent state, invent no outcome.
+  async releaseAbandonedPreparation(scope: {
+    projectId: string
+    sessionId: string
+  }): Promise<boolean> {
+    const loaded = await loadAuthority(this.options.repository, scope.projectId, scope.sessionId)
+    if (loaded.status !== 'found' || !this.promptPreparations.isAbandoned(loaded.session))
+      return false
+    await this.mutateRuntimeSession(scope, (latest) =>
+      this.promptPreparations.isAbandoned(latest)
+        ? recordRestartTurnOutcome(latest, latest)
+        : latest
+    )
+    return true
+  }
+
   // Commit restore normalization before attachment makes reads preserve runtime state.
   // Parked/approved Plans also lose their stale run, without a resumeRecovery error.
   async prepareRuntimeResume(scope: { projectId: string; sessionId: string }): Promise<void> {
     const preserveRuntimeState =
-      this.options.repository.hasLiveRuntimeSession?.(scope.projectId, scope.sessionId) ?? false
+      this.runtimeTerminalFailures.has(scope.sessionId) ||
+      (this.options.repository.hasLiveRuntimeSession?.(scope.projectId, scope.sessionId) ?? false)
     const restored = await this.options.repository.loadSessionWithDiagnostics(
       scope.projectId,
       scope.sessionId,
       { preserveRuntimeState }
     )
     if (restored.status !== 'found') throw new Error('Session could not be loaded for Resume.')
-    if (preserveRuntimeState) return
+    if (preserveRuntimeState || this.promptPreparations.ownsPreparation(restored.session)) return
+    if (restored.session.promptPreparation) {
+      await this.mutateRuntimeSession(scope, (latest) =>
+        recordRestartTurnOutcome(restored.session, latest)
+      )
+      return
+    }
     if (restored.session.resumeRecovery?.cause !== 'app-restart') {
       if (restored.session.activeRun) return
       const authority = await loadAuthority(
@@ -722,7 +900,7 @@ class SessionPersistenceStateOwner {
       if (sessionRevision(latest) !== sessionRevision(restored.session)) {
         throw new Error('Session changed before restart recovery could be committed.')
       }
-      return restored.session
+      return recordRestartTurnOutcome(restored.session, latest)
     })
   }
 
@@ -768,7 +946,11 @@ class SessionPersistenceStateOwner {
       throw new Error('Runtime mutation changed its Session identity.')
     }
     candidate.runtimeTranscriptOwner = 'main'
-    if (previous.activeRun && !candidate.activeRun)
+    if (
+      previous.activeRun &&
+      !candidate.activeRun &&
+      !this.promptPreparations.hasUnadmittedRun(previous)
+    )
       candidate.runtimeTranscriptLastRun = previous.activeRun
     if (isDeepStrictEqual(candidate, previous)) return previous
     const validation = await validateFinalizedArtifactBindings(
@@ -825,7 +1007,7 @@ class SessionPersistenceStateOwner {
       }
     }
     try {
-      this.options.notifyRuntimeTranscriptSessionUpdated?.(persisted)
+      this.options.notifyRuntimeTranscriptSessionUpdated?.(this.projectRuntimeSession(persisted))
     } catch {
       // A disconnected observer cannot undo the authoritative JSON commit.
     }
@@ -889,6 +1071,8 @@ class SessionPersistenceStateOwner {
       throw new Error('The active conversation branch changed before Task prompt admission.')
     }
     const candidate = rebaseTaskTurnOntoLatestSession(latest, prepared, command.contextReset)
+    if (candidate.promptPreparation?.promptMessageId === candidate.activeRun?.promptMessageId)
+      delete candidate.promptPreparation
     return latest.runtimeTranscriptOwner === 'main'
       ? this.mutateRuntimeSession(
           { projectId: latest.projectId, sessionId: latest.id },
@@ -1035,12 +1219,19 @@ class SessionPersistenceStateOwner {
     const ownsMainSettledRun =
       loaded.session.runtimeTranscriptOwner === 'main' &&
       loaded.session.runtimeTranscriptLastRun?.promptMessageId === command.promptMessageId
+    // Startup reconciliation already settled this prompt as interrupted by app restart and removed
+    // its durable run; the Task Run journal still needs to record its commit witness idempotently.
+    const ownsRestartInterruption =
+      loaded.session.activeRun === undefined &&
+      loaded.session.resumeRecovery?.cause === 'app-restart' &&
+      loaded.session.resumeRecovery.promptMessageId === command.promptMessageId
     if (
       !ownsActiveRun &&
       !ownsSettledMessage &&
       !ownsMainSettledMessage &&
       !ownsStagedMessage &&
-      !ownsMainSettledRun
+      !ownsMainSettledRun &&
+      !ownsRestartInterruption
     ) {
       throw new Error('Task completion no longer owns the active Session run.')
     }
@@ -1090,7 +1281,11 @@ class SessionPersistenceStateOwner {
                       timestamp: failureAt,
                       title: 'Task Run failed',
                       text: terminal.error ?? 'Task Run failed.',
-                      providerError: terminal.errorReportable === false
+                      providerError: terminal.errorReportable === false,
+                      ...('interruptionCause' in command &&
+                      command.interruptionCause === 'app-restart'
+                        ? { interruptionCause: 'app-restart' as const }
+                        : {})
                     }
                   ]
                 )
@@ -1129,7 +1324,7 @@ class SessionPersistenceStateOwner {
     if (artifactIds.length > 0 && !messages.some(({ id }) => id === command.messageId)) {
       throw new Error('Task completion Artifact owner Message is missing.')
     }
-    const candidate = materializeSessionConversationGraph({
+    let candidate: PersistedChatSession = materializeSessionConversationGraph({
       ...session,
       ...terminal,
       activeRun: undefined,
@@ -1143,6 +1338,36 @@ class SessionPersistenceStateOwner {
         newArtifacts.length > 0 ? (session.filesRevision ?? 0) + 1 : session.filesRevision,
       updatedAt: Math.max(session.updatedAt + 1, command.updatedAt)
     })
+    const outcome: TurnOutcome =
+      terminal.status === 'error'
+        ? 'interruptionCause' in command && command.interruptionCause === 'app-restart'
+          ? {
+              kind: 'interrupted',
+              cause: 'app-restart',
+              settledAt: command.updatedAt,
+              error: terminal.error,
+              errorReportable: false,
+              recovery: 'resume'
+            }
+          : {
+              kind: 'failed',
+              settledAt: command.updatedAt,
+              error: terminal.error,
+              errorReportable: terminal.errorReportable
+            }
+        : { kind: 'completed', settledAt: command.updatedAt }
+    candidate = session.status.startsWith('waiting-')
+      ? {
+          ...candidate,
+          status: session.status,
+          error: session.error,
+          errorReportable: session.errorReportable,
+          resumeRecovery: session.resumeRecovery
+        }
+      : {
+          ...setTurnOutcome(candidate, command.promptMessageId, outcome),
+          ...legacySessionStateForOutcome(outcome, command.promptMessageId)
+        }
     const validation = await validateFinalizedArtifactBindings(
       this.options.provenance,
       candidate,
@@ -1202,11 +1427,29 @@ class SessionPersistenceStateOwner {
   ): Promise<PersistedChatSession> {
     this.options.assertMutable(session.projectId, session.id, 'save')
     const { projectId, id: sessionId } = session
+    if (
+      saveAuthority.callerSignal &&
+      options.conversationCommands?.some(({ kind }) => kind === 'prepare-prompt')
+    )
+      this.promptPreparations.watchCaller(saveAuthority.callerSignal, (scope) =>
+        this.options.releaseAbandonedPreparation?.(scope)
+      )
     let authoritative = await loadAuthority(this.options.repository, projectId, sessionId)
     if (
       authoritative.status === 'found' &&
+      this.promptPreparations.isAbandoned(authoritative.session)
+    ) {
+      await this.releaseAbandonedPreparation({ projectId, sessionId })
+      authoritative = await loadAuthority(this.options.repository, projectId, sessionId)
+    }
+    if (
+      authoritative.status === 'found' &&
       authoritative.session.runtimeTranscriptOwner === 'main' &&
-      authoritative.session.activeRun &&
+      ((authoritative.session.promptPreparation &&
+        !this.promptPreparations.ownsPreparation(authoritative.session)) ||
+        (authoritative.session.activeRun &&
+          !this.promptPreparations.hasUnadmittedRun(authoritative.session))) &&
+      !this.runtimeTerminalFailures.has(sessionId) &&
       !this.options.repository.hasLiveRuntimeSession?.(projectId, sessionId)
     ) {
       // A preference save after restart must not publish the abandoned run back to the renderer.
@@ -1220,7 +1463,24 @@ class SessionPersistenceStateOwner {
       )
     }
     const authority = authoritative.status === 'found' ? authoritative.session : undefined
-    if (authority?.runtimeTranscriptOwner === 'main') {
+    if (
+      !authority &&
+      options.conversationCommands?.some(
+        (command) =>
+          command.kind === 'prepare-prompt' ||
+          command.kind === 'rollback-prompt' ||
+          command.preparationId
+      )
+    )
+      throw new Error('Conversation Branch changed before the user Message was admitted.')
+    session = preserveMainTurnOutcomes(session, authority)
+    const prepareMainOwnership =
+      authority && options.conversationCommands?.some(({ kind }) => kind === 'prepare-prompt')
+    if (prepareMainOwnership && authority.packageOrigin) {
+      // Imported research may be viewed but cannot acquire a new mutable transcript owner.
+      throw new Error('Imported research history is read-only.')
+    }
+    if (authority && (authority.runtimeTranscriptOwner === 'main' || prepareMainOwnership)) {
       // A renderer snapshot is presentation, not a second runtime writer. Apply only named user
       // preferences and graph commands to the latest authority. Never borrow its revision for the
       // incoming graph (even if that graph has newer timestamps).
@@ -1238,7 +1498,15 @@ class SessionPersistenceStateOwner {
         candidate.updatedAt = Math.max(authority.updatedAt + 1, Date.now())
       if (options.conversationCommands?.length) {
         try {
-          candidate = applySessionConversationCommands(candidate, options.conversationCommands)
+          candidate = preserveMainTurnOutcomes(
+            this.promptPreparations.apply(
+              candidate,
+              options.conversationCommands,
+              saveAuthority.callerSignal
+            ),
+            authority,
+            false
+          )
         } catch (error) {
           // A renderer edit can arrive after the UI becomes idle but before Main commits the
           // terminal runtime projection. Keep the command pending; independent named preferences
@@ -1278,6 +1546,7 @@ class SessionPersistenceStateOwner {
       delete rendererOwnedSession.runtimeSessionAdmissions
       delete rendererOwnedSession.runtimeConversationCommandIds
     }
+    delete rendererOwnedSession.promptPreparation
     delete rendererOwnedSession.runtimeContext
     delete rendererOwnedSession.archivedAt
     if (authority) delete rendererOwnedSession.planHistoryProjections
@@ -1309,9 +1578,14 @@ class SessionPersistenceStateOwner {
     if (authority) {
       if (options.conversationCommands?.length) {
         try {
-          conversationAuthority = applySessionConversationCommands(
+          conversationAuthority = preserveMainTurnOutcomes(
+            this.promptPreparations.apply(
+              authority,
+              options.conversationCommands,
+              saveAuthority.callerSignal
+            ),
             authority,
-            options.conversationCommands
+            false
           )
         } catch (error) {
           if (!(error instanceof SessionConversationCommandDeferredError)) throw error
@@ -1331,32 +1605,19 @@ class SessionPersistenceStateOwner {
         conversationAuthority = authority
       }
     }
-    const permissionOwnedStatus =
-      authority?.runtimeContext?.permission?.state === 'pending'
-        ? 'waiting-permission'
-        : rendererOwnedSession.status === 'waiting-permission'
-          ? (authority?.status ?? 'idle')
-          : undefined
-    const mainOwnedStatus = permissionOwnedStatus
-      ? permissionOwnedStatus
-      : authority?.status === 'waiting-plan-approval' ||
-          rendererOwnedSession.status === 'waiting-plan-approval'
-        ? (authority?.status ?? 'idle')
-        : undefined
-    // When an existing Session has live or recoverable runtime state, its status and recovery
-    // fields remain Main authority even before runtime transcript adoption. The validated Main
-    // turn-admission path is the only pre-adoption writer allowed to replace them.
-    const mainOwnedState =
-      !mainTurnAdmission && conversationAuthority
-        ? {
-            status: conversationAuthority.status,
-            error: conversationAuthority.error,
-            errorReportable: conversationAuthority.errorReportable,
-            resumeRecovery: conversationAuthority.resumeRecovery
-          }
-        : mainOwnedStatus
-          ? { status: mainOwnedStatus }
-          : {}
+    // Session state belongs to Main even before runtime transcript adoption. Historical state
+    // remains readable, but renderer saves cannot replace it or establish a new running/error
+    // Session. Only the validated Main turn-admission path may commit its prepared state here;
+    // this authority is private and cannot be supplied through renderer save options.
+    const stateAuthority = mainTurnAdmission
+      ? submittedSession
+      : (conversationAuthority ?? authority)
+    const mainOwnedState = {
+      status: stateAuthority?.status ?? ('idle' as const),
+      error: stateAuthority?.error,
+      errorReportable: stateAuthority?.errorReportable,
+      resumeRecovery: stateAuthority?.resumeRecovery
+    }
     // Once Main has durable Session-details ownership, a stale whole-Session renderer save may
     // continue the transcript but cannot roll back generated/manual copy or its attempt/usage
     // record. New and legacy Sessions can still establish their initial fallback on the first save;
@@ -1379,6 +1640,7 @@ class SessionPersistenceStateOwner {
           activities: conversationAuthority.activities,
           activityGroups: conversationAuthority.activityGroups,
           activeRun: conversationAuthority.activeRun,
+          promptPreparation: conversationAuthority.promptPreparation,
           runtimeConversationCommandIds: conversationAuthority.runtimeConversationCommandIds,
           pendingHistoryReplay: conversationAuthority.pendingHistoryReplay,
           branchContextResetRequired: conversationAuthority.branchContextResetRequired
@@ -1421,6 +1683,9 @@ class SessionPersistenceStateOwner {
         : {}),
       ...(authority ? { computeConcurrencyLimit: authority.computeConcurrencyLimit } : {}),
       ...mainOwnedState,
+      promptPreparation: conversationAuthority
+        ? conversationAuthority.promptPreparation
+        : authority?.promptPreparation,
       // Merging unchanged Main-owned authority is storage maintenance, not conversation activity.
       // Preserve the newest real activity time so opening a lazily loaded Session cannot move it into
       // the Workspace Active section. The dedicated Specialist binding transaction remains an

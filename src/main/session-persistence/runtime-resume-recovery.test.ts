@@ -172,7 +172,7 @@ it('exports runtime mutation failure diagnostics without changing the missing Se
 })
 
 describe('durable restart recovery before runtime attachment', () => {
-  it('keeps the first renderer run when no durable authority exists yet', async () => {
+  it('keeps the first renderer active run before durable authority exists', async () => {
     const root = await mkdtemp(join(tmpdir(), 'runtime-first-run-'))
     roots.push(root)
     initDataRoot(root)
@@ -219,7 +219,8 @@ describe('durable restart recovery before runtime attachment', () => {
     })
 
     expect(saved).toMatchObject({
-      status: 'running',
+      // Main owns Session status; the unadopted renderer run remains available for admission.
+      status: 'idle',
       activeRun: { promptMessageId: userMessage.id, startedAt: 2 }
     })
   })
@@ -445,7 +446,13 @@ describe('durable restart recovery before runtime attachment', () => {
       expect(saved.status).toBe(restored.session.status)
       expect(saved.activeRun).toEqual(restored.session.activeRun)
       expect(saved.resumeRecovery).toEqual(restored.session.resumeRecovery)
-      expect(saved.conversationGraph).toEqual(restored.session.conversationGraph)
+      if (live) expect(saved.conversationGraph).toEqual(restored.session.conversationGraph)
+      else
+        expect(saved.messages[0].turnOutcome).toMatchObject({
+          kind: 'interrupted',
+          cause: 'app-restart',
+          recovery: 'resume'
+        })
       const persisted = await h.raw()
       if (persisted.status !== 'found') throw new Error('Missing saved fixture')
       expect(persisted.session.status).toBe(saved.status)

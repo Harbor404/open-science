@@ -1,4 +1,5 @@
 import {
+  ACP_ARTIFACT_CLEANUP_FAILED_EVENT_TITLE,
   ACP_RESTORED_PERMISSION_REARMED_EVENT_TITLE,
   ACP_RESTORED_PERMISSION_SETTLED_EVENT_TITLE,
   type AcpRuntimeEvent,
@@ -9,7 +10,11 @@ import {
   ARTIFACT_OWNERSHIP_PERSISTENCE_RACE,
   type ArtifactFile
 } from '../../../../shared/artifacts'
-import { SessionRevisionConflictError } from '../../../../shared/session-persistence'
+import {
+  SessionRevisionConflictError,
+  type PersistedChatSession,
+  type SaveSessionOptions
+} from '../../../../shared/session-persistence'
 import type { ActivePlanProjection } from '../../../../shared/session-plan/contract'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -29,6 +34,7 @@ import {
   saveSessionInOrder
 } from '../session-persistence/session-persistence'
 import { resetSessionConversationIntentsForTests } from '../../stores/session-conversation-intents'
+import { useWorkspaceOperationErrors } from './workspace-operation-error'
 import {
   applyWorkspaceRuntimeEvent,
   applyWorkspaceRuntimeEventBatch,
@@ -63,11 +69,32 @@ type SessionSaveBoundary = (
   session: Parameters<typeof saveSessionInOrder>[0]
 ) => Promise<Parameters<typeof saveSessionInOrder>[0] | void>
 
+const acknowledgeConversationCommands = (
+  session: PersistedChatSession,
+  options?: SaveSessionOptions
+): PersistedChatSession => ({
+  ...session,
+  runtimeConversationCommandIds: [
+    ...new Set([
+      ...(session.runtimeConversationCommandIds ?? []),
+      ...(options?.conversationCommands?.map(({ id }) => id) ?? [])
+    ])
+  ]
+})
+
 const stubReviewerApi = (
   reviewerRun: ReturnType<typeof vi.fn>,
   saveSession: SessionSaveBoundary = async (session) => session
 ): void => {
-  vi.stubGlobal('window', { api: { reviewer: { run: reviewerRun }, sessions: { saveSession } } })
+  vi.stubGlobal('window', {
+    api: {
+      reviewer: { run: reviewerRun },
+      sessions: {
+        saveSession: async (session: PersistedChatSession, options?: SaveSessionOptions) =>
+          acknowledgeConversationCommands((await saveSession(session)) ?? session, options)
+      }
+    }
+  })
 }
 
 // Creates a pending permission request tied to the default test session.
@@ -151,6 +178,7 @@ describe('workspace runtime events', () => {
     resetSessionConversationIntentsForTests()
     resetSessionPersistenceWriteFailuresForTests()
     useSessionStore.setState(createInitialSessionState())
+    useWorkspaceOperationErrors.setState({ errors: {} })
     usePreviewWorkbenchStore.setState(createInitialPreviewWorkbenchState())
     useNavigationStore.setState({ view: 'home', activeProjectId: undefined })
     useSessionStore.getState().appendUserMessage({
@@ -1345,7 +1373,7 @@ describe('workspace runtime events', () => {
     })
   })
 
-  it('surfaces native compaction failures as non-reportable session errors', async () => {
+  it('surfaces manual native compaction failures as Operation Errors', async () => {
     useSessionStore.getState().finishRun('transport-session-1')
     await applyWorkspaceRuntimeEvent(
       createEvent({
@@ -1368,14 +1396,17 @@ describe('workspace runtime events', () => {
     )
 
     expect(useSessionStore.getState().sessions[0]).toMatchObject({
-      status: 'error',
+      status: 'idle',
       compacting: undefined,
-      error: 'Agent rejected /compact',
-      errorReportable: false,
+      error: undefined,
+      errorReportable: undefined,
       activities: [
         expect.objectContaining({ status: 'failed', title: 'Context compaction failed' })
       ]
     })
+    expect(useWorkspaceOperationErrors.getState().errors['transport-session-1']).toBe(
+      'Agent rejected /compact'
+    )
   })
 
   it('ignores stale compaction events after a newer retry owns the session', async () => {
@@ -1465,7 +1496,9 @@ describe('workspace runtime events', () => {
       content: 'compare these screenshots'
     })
     // The recovery effect flips the session to compacting before this event is applied.
-    useSessionStore.getState().beginCompaction('transport-session-1', { supersedeActiveRun: true })
+    useSessionStore.setState((state) => ({
+      sessions: state.sessions.map((session) => ({ ...session, compacting: true }))
+    }))
 
     const applied = await applyWorkspaceRuntimeEvent({
       ...overflowEvent(),
@@ -1588,6 +1621,22 @@ describe('workspace runtime events', () => {
     // The run finishing clears the transient status so it never lingers into the next turn.
     await applyWorkspaceRuntimeEvent(createEvent({ id: 'event-2', kind: 'stop', text: 'end_turn' }))
     expect(useSessionStore.getState().sessions[0].agentStatus).toBeUndefined()
+  })
+
+  it('reports Artifact cleanup failure as an operation error without touching the session', async () => {
+    const before = structuredClone(useSessionStore.getState().sessions[0])
+    const applied = await applyWorkspaceRuntimeEvent(
+      createEvent({
+        id: 'cleanup-1',
+        kind: 'system',
+        level: 'warning',
+        title: ACP_ARTIFACT_CLEANUP_FAILED_EVENT_TITLE,
+        text: 'cleanup exploded'
+      })
+    )
+    expect(applied).toBe(true)
+    expect(useWorkspaceOperationErrors.getState().errors[before.id]).toBe('cleanup exploded')
+    expect(useSessionStore.getState().sessions[0]).toEqual(before)
   })
 
   it('suppresses non-actionable Codex startup and transport fallback diagnostics', async () => {
@@ -2537,11 +2586,13 @@ describe('workspace runtime events', () => {
       releaseQueuedSave = resolve
     })
     let durableTitle = ''
-    const saveSession = vi.fn(async (submitted: ReturnType<typeof toPersistedSession>) => {
-      if (submitted.title === 'Queued stale') await queuedSaveBlocked
-      durableTitle = submitted.title
-      return submitted
-    })
+    const saveSession = vi.fn(
+      async (submitted: ReturnType<typeof toPersistedSession>, options?: SaveSessionOptions) => {
+        if (submitted.title === 'Queued stale') await queuedSaveBlocked
+        durableTitle = submitted.title
+        return acknowledgeConversationCommands(submitted, options)
+      }
+    )
     vi.stubGlobal('window', {
       api: {
         sessions: {
@@ -3235,9 +3286,8 @@ describe('workspace runtime events', () => {
 
     expect(operationOrder).toEqual(['save', 'finalize'])
     expect(finalizeRunArtifacts).toHaveBeenCalledOnce()
-    expect(useSessionStore.getState().sessions[0].error).toMatch(
-      /^Generated file finalization cannot be retried:/u
-    )
+    // Proof rejection is returned to the operation owner; renderer replay cannot settle a turn.
+    expect(useSessionStore.getState().sessions[0].error).toBeUndefined()
   })
 
   it('attempts the recoverable ownership persistence race at most twice', async () => {
@@ -3991,7 +4041,7 @@ describe('workspace runtime events', () => {
     })
   })
 
-  it('records finalize failures and retries when an artifact event is replayed', async () => {
+  it('returns finalize failures without settling a turn and retries replayed artifacts', async () => {
     const finalizedArtifact = createArtifactFile({
       id: 'transport-session-1:message-1:result.txt',
       sessionId: 'transport-session-1',
@@ -4024,8 +4074,8 @@ describe('workspace runtime events', () => {
     expect(finalizeRunArtifacts).toHaveBeenCalledOnce()
 
     expect(useSessionStore.getState().sessions[0]).toMatchObject({
-      status: 'error',
-      error: expect.stringContaining('Generated file finalization failed')
+      status: 'idle',
+      error: undefined
     })
 
     await applyWorkspaceRuntimeEvent(artifactEvent, { finalizeRunArtifacts, saveSession })
@@ -4074,7 +4124,10 @@ describe('workspace runtime events', () => {
     await applyWorkspaceRuntimeEvent(artifactEvent, { finalizeRunArtifacts, saveSession })
 
     expect(finalizeRunArtifacts).toHaveBeenCalledOnce()
-    expect(useSessionStore.getState().sessions[0].error).toBeUndefined()
+    // A successful replay updates references, but only Main may repair a prior terminal outcome.
+    expect(useSessionStore.getState().sessions[0].error).toContain(
+      'Artifact run claim not found: artifact-claim-expired'
+    )
   })
 
   it('finalizes sibling artifact events independently', async () => {
@@ -4227,7 +4280,7 @@ describe('workspace runtime events', () => {
     expect(reconcilePendingArtifacts).toHaveBeenCalledOnce()
     expect(finalizeRunArtifacts).not.toHaveBeenCalled()
     const publishedSession = useSessionStore.getState().sessions[0]
-    expect(publishedSession.error).toBeUndefined()
+    expect(publishedSession.error).toContain('current claim failed')
     expect(
       publishedSession.artifacts?.find(({ id }) => id === nativePendingArtifact.id)
     ).toMatchObject({ isPublished: true })
@@ -4354,11 +4407,12 @@ describe('workspace runtime events', () => {
     expect(finalizeRunArtifacts).toHaveBeenCalledOnce()
     expect(useSessionStore.getState().sessions[0].error).toContain('generic retry failed')
     expect(useSessionStore.getState().sessions[0].artifactErrorEventIds).toEqual([
+      'replayed-finalized-event',
       'sibling-artifact-event'
     ])
   })
 
-  it('records native artifact reconciliation failures for retry', async () => {
+  it('returns native artifact reconciliation failures without changing terminal state', async () => {
     const nativePendingArtifact = createArtifactFile({
       id: 'native-version-reconcile-failure',
       artifactId: 'native-artifact-reconcile-failure',
@@ -4393,8 +4447,8 @@ describe('workspace runtime events', () => {
     ).rejects.toThrow('reconcile failed')
 
     expect(useSessionStore.getState().sessions[0]).toMatchObject({
-      status: 'error',
-      error: expect.stringContaining('Generated file finalization failed')
+      status: 'idle',
+      error: undefined
     })
   })
 
@@ -4436,9 +4490,10 @@ describe('workspace runtime events', () => {
     ).rejects.toThrow('Artifact reconciliation did not resolve all native Versions.')
 
     expect(useSessionStore.getState().sessions[0]).toMatchObject({
-      status: 'error',
-      artifactErrorEventIds: ['native-incomplete-event']
+      status: 'idle',
+      error: undefined
     })
+    expect(useSessionStore.getState().sessions[0].artifactErrorEventIds).toBeUndefined()
   })
 })
 
