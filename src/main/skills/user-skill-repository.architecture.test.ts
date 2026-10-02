@@ -389,6 +389,7 @@ describe('User Skill repository architecture', () => {
           'src/shared/renderer-contract-catalog.test.ts'
         ],
         consumer: [
+          'src/main/notebook/windows-runtime-manager.test.ts',
           'src/main/storage/wsl-npm-migration.integration.test.ts',
           'src/main/composition/notebook-environment.test.ts',
           'src/main/literature/command-owner.test.ts',
@@ -929,7 +930,9 @@ describe('User Skill repository architecture', () => {
           'src/main/notebook/real-notebook-lineage.integration.test.ts',
           'src/main/notebook/real-parquet-lineage.integration.test.ts',
           'src/main/notebook/r-connection-guard.test.ts',
-          'src/main/notebook/dependency-analysis.lineage-regressions.test.ts'
+          'src/main/notebook/dependency-analysis.lineage-regressions.test.ts',
+          'src/main/session-diagnostics/export-evidence.integration.test.ts',
+          'src/main/permission-grants/connector-broker.test.ts'
         ]
       },
       capabilityOverlays: ['windows_sensitive', 'e2e_regressions', 'e2e_delegation'],

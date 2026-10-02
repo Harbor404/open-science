@@ -487,7 +487,7 @@ describe('Settings backend ownership architecture', () => {
         getComputeBookmarks getConnectorDetail getConnectors getConversationSkillImportEnabled getGitHubTokenStatus getGrantedLocalRoots getLocalShellRuntimePreference getManualInterpreters getNotebookNetwork getNotebookNetworkStatus getNotificationsEnabled getPackageMirror
         getPreflight getRuntimeEnablement getSettingsView getShowNotificationContent getSkillDetail getSkillMarketplaceBatch getSkillMarketplaceDetail getWsl2BashPreviewStatus getWslSetupStatus hasActiveInstall holdInstallAdmission
         getStoredSettings importAgentHomeSkills importSkill importSkillArchiveBatch importSkillZip
-        importSkillZipBatch installClaude installCodeBuddy installCodex installMissingWslDependencies installNotebookNetwork installOpencode installRecommendedWslDistro installSkillMarketplace installWslPlatform isEncryptionAvailable
+        cancelNotebookNetworkSetup importSkillZipBatch installClaude installCodeBuddy installCodex installMissingWslDependencies installNotebookNetwork installOpencode installRecommendedWslDistro installSkillMarketplace installWslPlatform isEncryptionAvailable
         isNpmAvailable listAgentHomeSkills listConnectors listDeviceCredentials listHostSkills listSkillMarketplace listSkills listSpecialistSkillCatalog listUserSkills
         dispose loginClaudeShared loginIsolatedClaude loginIsolatedClaudeBrowser loginIsolatedCodex
         logoutClaudeShared logoutIsolatedClaude logoutIsolatedCodex logoutXaiOAuth markOnboardingComplete
@@ -1539,7 +1539,9 @@ describe('Settings backend ownership architecture', () => {
       'src/main/literature/smart-collections.test.ts',
       'src/main/notebook/runtime-service.macos-isolation.integration.test.ts',
       'src/main/acp/library-auto-policy.test.ts',
-      'src/main/literature/journal-attributes.test.ts'
+      'src/main/literature/journal-attributes.test.ts',
+      'src/main/session-diagnostics/export-evidence.integration.test.ts',
+      'src/main/permission-grants/connector-broker.test.ts'
     ])
     expect(
       [

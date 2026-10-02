@@ -198,7 +198,9 @@
     "src/main/credential-identity/macos.test.ts",
     "src/main/credential-identity/probe-logging.test.ts",
     "src/main/process-tree-windows.ts",
-    "src/main/process-tree.windows.integration.test.ts"
+    "src/main/process-tree.windows.integration.test.ts",
+    "src/main/windows-titlebar.ts",
+    "src/main/windows-titlebar.test.ts"
   ],
   "interfacePaths": [
     "src/main/app-lifecycle.ts",
@@ -338,7 +340,8 @@
       "src/main/credential-identity/windows-profile-key.test.ts",
       "src/main/credential-identity/macos.test.ts",
       "src/main/credential-identity/probe-logging.test.ts",
-      "src/main/process-tree.windows.integration.test.ts"
+      "src/main/process-tree.windows.integration.test.ts",
+      "src/main/windows-titlebar.test.ts"
     ],
     "contract": [
       "src/preload/index.test.ts",
@@ -346,6 +349,7 @@
       "src/shared/renderer-contract-catalog.test.ts"
     ],
     "consumer": [
+      "src/main/notebook/windows-runtime-manager.test.ts",
       "src/main/storage/wsl-npm-migration.integration.test.ts",
       "src/main/literature/command-owner.test.ts",
       "src/main/delegation/escaped-descendant.test.ts",
@@ -1174,7 +1178,8 @@
       "src/main/notebook/real-parquet-lineage.integration.test.ts",
       "src/main/notebook/dependency-analysis.cwd-lineage.test.ts",
       "src/main/notebook/r-connection-guard.test.ts",
-      "src/main/notebook/dependency-analysis.lineage-regressions.test.ts"
+      "src/main/notebook/dependency-analysis.lineage-regressions.test.ts",
+      "src/main/permission-grants/connector-broker.test.ts"
     ]
   },
   "capabilityOverlays": ["e2e_regressions", "e2e_delegation", "windows_sensitive"],

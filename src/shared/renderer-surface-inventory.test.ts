@@ -152,17 +152,21 @@ const GENERATED_SOURCE_OMISSIONS = [
   'window.clearFind',
   'window.closeFind',
   'window.findInPage',
+  'window.isFullScreen',
   'window.onCloseActivePane',
   'window.onCloseConfirmDismiss',
   'window.onCloseConfirmRequest',
   'window.onFindInPageResult',
+  'window.onFullScreenChanged',
   'window.onFindInOffice',
   'window.onHideWindowFind',
   'window.onInterfaceScaleShortcut',
   'window.onShowWindowFind',
   'window.onWindowFindAppearance',
   'window.sendCloseConfirmResponse',
-  'window.setZoomFactor'
+  'window.setZoomFactor',
+  'window.showTitleBarMenu',
+  'window.updateTitleBar'
 ] as const
 
 const BROWSER_NATIVE_CALLABLE_PATHS = [
@@ -257,6 +261,7 @@ const REMOTE_LOCAL_ONLY_CHANNELS: GroupedInventory = {
     'install-codex',
     'install-missing-wsl-dependencies',
     'install-notebook-network',
+    'cancel-notebook-network-setup',
     'install-opencode',
     'install-recommended-wsl-distro',
     'install-wsl-platform',

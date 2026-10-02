@@ -291,6 +291,14 @@ colors communicate a successful or failed probe/migration result.
 | `--z-index-toast`         | `z-toast`         | `40`  | Background notices and undo snackbars below modal backdrops          |
 | `--z-index-markdown-menu` | `z-markdown-menu` | `200` | Streamdown Mermaid and table format menus above fullscreen content   |
 
+Shared `Dialog` and `AlertDialog` own modal stacking through `overlay-layer.ts`.
+Their root advances the inherited layer by 20 (the first modal is 60); Select,
+DropdownMenu, Popover and Tooltip use the intermediate +10 layer. React context
+survives portals, so a child confirmation or menu remains above its owning modal.
+Expanded workbench previews provide the same scope without remounting their content.
+Use these shared primitives instead of importing Radix dialogs directly or adding
+surface-specific z-index overrides. Existing standalone floating styles remain unchanged.
+
 Background notices share `z-toast`: action toasts, the notification stack, persistent storage
 recovery alerts, live message notices and their error fallback. Modal backdrops must cover these
 notices while the background is blocked. Inline errors stay within their owning surface. Preserve
@@ -414,7 +422,7 @@ Active-dialog menus and other foreground child layers retain their own ordering.
 
 ### PDF reading and annotations
 
-- Original PDF, Figures & Tables, and Notes & Annotations use distinct leading document, image, and notebook icons with visible labels.
+- Original PDF, Figures & Tables, and Notes & Annotations use distinct leading document, image, and notebook icons with visible labels. Figures & Tables also accepts finalized upload/artifact PDF versions independently of Literature membership, Agent context, or annotation write access. Opening Figures & Tables restores cached results only. New analysis requires an explicit Analyze PDF or Download and continue action; uploading, opening a preview, and switching tabs never start analysis. Cancellation does not automatically restart analysis.
 - Parsed PDF tables in Figures & Tables preserve source row/column spans, use a collapsed border on every cell, and share one neutral theme surface without inferring headers from the first row or merged cells. Text and numbers use the same start alignment, with tabular digits and numeric no-wrap retained. Only the hovered cell is tinted, including when it spans multiple rows; row-spanning content stays vertically centered. Minimum widths apply uniformly because the first DOM cell below a rowspan may belong to a later column. These rules also apply to cached tables and do not change source text or exports.
 - Empty Notes shows a short explanation and a return-to-PDF action; an unavailable source shows a status instead of an empty panel.
 - Literature annotations belong to the exact PDF attachment version and appear in both Library and project previews. Upload/artifact annotations remain conversation-scoped. Both use the shared tag catalog.
@@ -818,6 +826,15 @@ The upper-right pin toggles the current Session through the shared Session contr
 - Toolbar action buttons are `h-8 w-8`; send uses `bg-primary text-primary-foreground hover:bg-primary/80`, cancel uses `bg-bg-200 text-text-000 hover:bg-bg-300`.
 - Read-only state: apply `opacity-50` to the input content and action area as a whole, but do not shrink the layout.
 - Drag-and-drop state: use `ring-ring/50`, `border-ring/50`, or a semantic success token. Do not hardcode a new green.
+- Native files can be dropped anywhere in the central conversation (header, transcript, empty
+  space, or composer), excluding the left navigation, right preview, and portal dialogs. Use one
+  bounded overlay with neutral attachment/package wording because native hover events may hide
+  filenames. Ordinary files use the existing composer intake and remain draft attachments until
+  submission; one `.science` package opens the existing Project import flow. Reject mixed package
+  batches without partially attaching or importing. Respect blocked composer and Project availability.
+- Keep the new-Session `.science` import guide and keyboard-accessible picker visible at rest.
+  Ordinary file drags must not highlight that package-only guide. Clear hover feedback on leave,
+  drop, cancellation, or window blur.
 
 ### Resource Viewer / File Library
 
@@ -1169,6 +1186,13 @@ intentional exceptions and validation. Cross-panel Settings write failures use a
 notice above the scroll area. Global action feedback uses the top-center stack; background Notebook and recovery notices share the bottom-right stack.
 Local-file failures and Literature undo stay inside their owning content region.
 
+Restrict only the feature or region made unavailable by a failure; use application-wide blocking only
+when the application cannot operate safely. All floating background errors offer dismissal without
+clearing their underlying failure or safety gates. Keep recovery available in the owning surface:
+Session-load failures in Settings / Archived, size limits beside the affected conversation composer,
+and Notebook status/setup failures in Settings / Runtimes. Environment diagnostics start collapsed,
+outside the live summary; Retry shows pending feedback and never disables Close.
+
 Settings region warnings and operation failures, including preference saves, app-icon previews, logs, credentials, connection tests and storage scans, use the shared Notice surface. Keep retry, dismiss and diagnostics inside the owning notice when present, and keep the language rollback explanation available to screen readers. Input-linked validation stays beside its input using fieldErrorClassName (12px text, 20px line height, destructive text color and safe word wrapping), preserving ids and aria-describedby. Do not ellipsize embedded messages. Dense resource-row status labels, validation counters and destructive actions retain their existing compact presentation.
 
 Use the shared `ErrorNotice` for error summaries. The default is a compact inline surface across
@@ -1251,6 +1275,21 @@ alert region excludes the diagnostic payload so opening it does not announce the
 | File library      | Search                                               | `Input` / `CommandInput`                                                                 |
 | File library      | Grid/list switch                                     | `ToggleGroup type="single"`; hover `bg-muted`, selected `bg-bg-400`                      |
 | File library      | File card / file row                                 | `Card` / button row + neutral hover `bg-bg-100` / `bg-bg-200`                            |
+
+## Windows application menu row
+
+Windows desktop main windows place File, Edit, View and Help next to the Open-Science brand in a
+36px title-bar row. Electron `titleBarOverlay` retains native caption controls, window resizing and
+system window behavior. Reserve those controls with the `titlebar-area-*` CSS environment variables;
+only the menu buttons use `app-region: no-drag`, leaving the rest of the row draggable. Native popups
+preserve the editing target and use the existing command owners for settings, search, interface scale,
+close and quit. Alt/F10 focus the menu row; arrows move between menus and open them; Escape returns
+focus to the previous control. Scale and theme changes synchronize the native overlay from the existing
+renderer preferences and color tokens. Account for the row in full-height application layouts.
+Native fullscreen hides the row and removes its layout offset; leaving fullscreen restores both.
+Fullscreen state comes from the native window, including a fresh snapshot after renderer reload;
+Alt/F10 menu entry is inactive while the row is hidden. This state is not persisted.
+macOS and Linux keep their existing native window/menu presentation, and Web clients add no desktop row.
 
 ## Language Guidelines
 

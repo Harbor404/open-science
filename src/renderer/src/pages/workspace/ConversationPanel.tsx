@@ -1,3 +1,7 @@
+import { replayAnnotationTarget } from '../../../../shared/replay-reference'
+import { SessionDiscussionSource } from './SessionDiscussionSource'
+import { SessionDiscussionButton } from './SessionDiscussionButton'
+import { createSessionReplayItem } from './workspace-session-actions'
 import { forkSession, sessionForkAvailable } from '@/lib/session-fork'
 import { sideChatBlock, sideChatBlockMessage } from './side-chat-availability'
 import {
@@ -61,6 +65,7 @@ import {
   MessageCircleMore,
   PanelRight,
   Plus,
+  Play,
   RotateCcw,
   ScanEye,
   Square,
@@ -79,8 +84,7 @@ import {
   type TextAnnotation
 } from '../../../../shared/annotations'
 
-import { FileDropOverlay } from '@/components/FileDropOverlay'
-import { sessionPackageImportAvailable } from '@/components/session-package-import-menu-model'
+import { ProjectPackageDropZone } from '@/components/ProjectPackageDropZone'
 import { DiagnosticDetails } from '@/components/diagnostic-details'
 import { ErrorNotice } from '@/components/error-notice'
 import { Button } from '@/components/ui/button'
@@ -94,7 +98,6 @@ import {
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { useFileDropZone } from '@/hooks/useFileDropZone'
 import { cn } from '@/lib/utils'
 import {
   isRetryableArtifactFinalizationError,
@@ -322,9 +325,10 @@ type ConversationPanelView = {
   activeSession: ChatSession | undefined
   composerFocusKey?: string
   canEditDraft: boolean
+  persistenceBlocked?: boolean
   actionError: string | null
   sideChatDisabledReason?: string
-  sessionImport?: { projectId: string; canImport: boolean }
+  sessionImport?: { projectId: string; projectName?: string; canImport: boolean }
 }
 
 type ConversationPanelSpecialist = {
@@ -501,6 +505,7 @@ const ConversationPanel = ({
     activeSession,
     composerFocusKey,
     canEditDraft,
+    persistenceBlocked,
     actionError,
     sideChatDisabledReason,
     sessionImport
@@ -1027,12 +1032,6 @@ const ConversationPanel = ({
     await submissions.submitResume(sessionId, onResumeSession)
   }
 
-  // Drag-and-drop shares the same staging callback as the picker and paste paths.
-  const { isDragging, dropZoneProps } = useFileDropZone({
-    enabled: canEditDraft && !isUploadingAttachments,
-    onFiles: onStageAttachmentFiles
-  })
-
   // Submits the current doc, passing the ids of any skills picked as inline chips.
   const handleWslSetupCommand = async (): Promise<void> => {
     if (!canEditDraft) return
@@ -1251,8 +1250,14 @@ const ConversationPanel = ({
 
   return (
     <ResizablePanel id="main-content" defaultSize="60%" minSize="30%">
-      <section
-        className="flex h-full min-w-0 flex-col overflow-hidden bg-bg-10 p-[6px] pl-4 max-md:p-0"
+      <ProjectPackageDropZone
+        projectId={sessionImport?.projectId ?? ''}
+        projectName={sessionImport?.projectName ?? t('Project')}
+        canImport={sessionImport?.canImport ?? false}
+        canAttach={canEditDraft && !isUploadingAttachments && !ordinaryComposerBlocked}
+        onFiles={onStageAttachmentFiles}
+        data-testid="workspace-file-drop-zone"
+        className="relative flex h-full min-w-0 flex-col overflow-hidden bg-bg-10 p-[6px] pl-4 max-md:p-0"
         data-session-id={activeSession?.id ?? ''}
         data-agent-running={activeSession?.status === 'running' ? 'true' : 'false'}
       >
@@ -1407,6 +1412,16 @@ const ConversationPanel = ({
             {/* Runtime and session errors stay near the composer so recovery is visible. */}
             <div className={composerContentClassName}>
               <div className="px-1 md:px-3">
+                {persistenceBlocked ? (
+                  <ErrorNotice
+                    inline
+                    role="alert"
+                    title={t('Conversation storage limit reached')}
+                    description={t(
+                      'This conversation exceeded the 256 MiB storage limit. Its current run was stopped. Start a new conversation to keep working. Changes after the last successful save are not durable.'
+                    )}
+                  />
+                ) : null}
                 {conversation.planProjectionRecoveryError && activeSession ? (
                   <UnavailablePlanNotice
                     key={`${activeSession.id}:${String(activeSession.runtimeContext?.revision)}`}
@@ -1830,19 +1845,44 @@ const ConversationPanel = ({
                             'Read-only. Browse the conversation, files and recorded results. Code execution and continuation are disabled.'
                           )}
                         </p>
-                        {sessionForkAvailable() ? (
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          {sessionForkAvailable() ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                void forkSession(activeSession)
+                              }}
+                            >
+                              <GitBranch className="size-4" aria-hidden="true" />
+                              {t('Fork to continue')}
+                            </Button>
+                          ) : null}
                           <Button
                             variant="outline"
                             size="sm"
-                            className="mt-2"
+                            aria-controls="right-panel"
                             onClick={() => {
-                              void forkSession(activeSession)
+                              usePreviewWorkbenchStore
+                                .getState()
+                                .upsertAndActivateItem(
+                                  createSessionReplayItem(
+                                    activeSession.projectId,
+                                    activeSession.id,
+                                    activeSession.title
+                                  )
+                                )
                             }}
                           >
-                            <GitBranch className="size-4" aria-hidden="true" />
-                            {t('Fork to continue')}
+                            <Play className="size-4" aria-hidden="true" />
+                            {t('View replay')}
                           </Button>
-                        ) : null}
+                          <SessionDiscussionButton
+                            key={activeSession.id}
+                            projectId={activeSession.projectId}
+                            sessionId={activeSession.id}
+                          />
+                        </div>
                         <details className="mt-2 text-xs leading-5 text-muted-foreground">
                           <summary className="cursor-pointer">{t('Package source')}</summary>
                           <dl className="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
@@ -1891,7 +1931,6 @@ const ConversationPanel = ({
                         )}
                         data-specialist-color={specialistComposerColor}
                         onSubmit={(event) => event.preventDefault()}
-                        {...dropZoneProps}
                         {...annotationDrop.props}
                       >
                         {annotationDrop.over ? (
@@ -1914,15 +1953,13 @@ const ConversationPanel = ({
                             aria-hidden="true"
                           />
                         ) : null}
-                        {/* File-drag overlay is scoped to the composer input card only. */}
-                        {isDragging ? (
-                          <FileDropOverlay
-                            label={
-                              sessionPackageImportAvailable()
-                                ? t('Drop files')
-                                : t('Drop files to attach')
-                            }
-                            className="rounded-2xl"
+                        {activeSession &&
+                        !annotations.some((annotation) => replayAnnotationTarget(annotation)) ? (
+                          <SessionDiscussionSource
+                            key={activeSession.id}
+                            projectId={activeSession.projectId}
+                            sessionId={activeSession.id}
+                            context={activeSession.runtimeContext}
                           />
                         ) : null}
                         {pdfContext.bindings.length > 0 ? (
@@ -3014,7 +3051,7 @@ const ConversationPanel = ({
           contextUsage={contextUsage}
           onOpenChange={setIsContextWindowOpen}
         />
-      </section>
+      </ProjectPackageDropZone>
     </ResizablePanel>
   )
 }
