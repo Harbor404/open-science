@@ -16,6 +16,7 @@ import * as literature from './renderer-contracts/literature'
 import * as manuscripts from './renderer-contracts/manuscripts'
 import * as memory from './renderer-contracts/memory'
 import * as notebook from './renderer-contracts/notebook'
+import * as sessionReplay from './renderer-contracts/session-replay'
 import * as notifications from './renderer-contracts/notifications'
 import * as previews from './renderer-contracts/previews'
 import * as permissions from './renderer-contracts/permissions'
@@ -56,6 +57,7 @@ export const RENDERER_API_CONTRACT = composeRendererApiContract(
   previews.officePreviewAttachFrameContracts,
   permissions.contracts,
   files.platformContracts,
+  sessionReplay.contracts,
   previews.previewDeleteContracts,
   files.projectFilesGetOverviewContracts,
   projects.projectsCreateContracts,
