@@ -918,6 +918,14 @@ const dispatchDrag = (type: string, dataTransferTypes: string[], files: File[] =
 }
 
 describe('ConversationPanel header spacing', () => {
+  it('keeps a storage-limit explanation local to the blocked conversation', () => {
+    renderPanel({ view: { persistenceBlocked: true } })
+    expect(container.textContent).toContain('Conversation storage limit reached')
+    expect(container.textContent).toContain('Start a new conversation to keep working.')
+    renderPanel({ view: { persistenceBlocked: false } })
+    expect(container.textContent).not.toContain('Conversation storage limit reached')
+  })
+
   it('shows background export progress in New conversation and Session workspace', () => {
     act(() =>
       usePackageOperationStore.setState({
@@ -7438,6 +7446,30 @@ it('offers Fork to continue while leaving the imported conversation read-only', 
     button!.click()
   })
   expect(forkSessionMock).toHaveBeenCalledWith(activeSession)
+  expect(usePreviewWorkbenchStore.getState().items).toEqual([])
+  const replay = [...container.querySelectorAll('button')].find((button) =>
+    button.textContent?.includes('View replay')
+  )!
+  expect(replay).toBeDefined()
+  await act(async () => {
+    replay.click()
+  })
+  expect(usePreviewWorkbenchStore.getState().panelState).toBe('open')
+  expect(usePreviewWorkbenchStore.getState().items).toContainEqual(
+    expect.objectContaining({
+      toolKind: 'replay',
+      replaySourceProjectId: 'project-a',
+      replaySourceSessionId: activeSession.id
+    })
+  )
+  await act(async () => {
+    replay.click()
+  })
+  expect(
+    usePreviewWorkbenchStore
+      .getState()
+      .items.filter((item) => item.type === 'tool' && item.toolKind === 'replay')
+  ).toHaveLength(1)
 })
 
 it('shows the branch source chat number and opens that source session', () => {

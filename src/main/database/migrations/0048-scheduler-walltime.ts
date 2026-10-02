@@ -62,7 +62,7 @@ const quotedColumns = (columns: readonly string[]): string =>
   columns.map((column) => `"${column}"`).join(', ')
 
 const schedulerWalltimeMigration = {
-  id: '0047_scheduler_walltime',
+  id: '0048_scheduler_walltime',
   statements: [
     `CREATE TABLE "__open_science_ComputeJobOperationBackup" AS SELECT ${quotedColumns(computeJobOperationColumns)} FROM "ComputeJobOperation"`,
     `CREATE TABLE "__open_science_ComputeJobNew" (

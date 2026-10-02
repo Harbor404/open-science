@@ -1,5 +1,6 @@
-import { schedulerWalltimeMigration } from './migrations/0047-scheduler-walltime'
+import { schedulerWalltimeMigration } from './migrations/0048-scheduler-walltime'
 import { journalAttributesMigration } from './migrations/0046-journal-attributes'
+import { sessionReplayMigration } from './migrations/0047-session-replay'
 import { literatureSmartCollectionsMigration } from './migrations/0044-literature-smart-collections'
 import { literatureSmartPauseRunMigration } from './migrations/0045-literature-smart-pause-run'
 import { classificationUsageMigration } from './migrations/0042-classification-usage'
@@ -884,6 +885,17 @@ const MIGRATION_MANIFEST = [
       journalAttributesMigration.statements,
       journalAttributesMigration.verifiers,
       journalAttributesMigration.operations
+    ),
+    backupOnApply: 'required',
+    backupRetention: 'retain'
+  },
+  {
+    ...sessionReplayMigration,
+    checksum: checksumMigrationPayload(
+      sessionReplayMigration.id,
+      sessionReplayMigration.statements,
+      sessionReplayMigration.verifiers,
+      sessionReplayMigration.operations
     ),
     backupOnApply: 'required',
     backupRetention: 'retain'

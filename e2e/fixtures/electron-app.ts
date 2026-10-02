@@ -38,6 +38,9 @@ import {
   selectProcessTree
 } from '../../scripts/performance/process-snapshot'
 import { createProjectDbClient } from '../../src/main/projects/prisma-client'
+import { NotebookRunRepository } from '../../src/main/notebook/repository'
+import { createRootNotebookLane } from '../../src/main/notebook/lane-identity'
+import type { NotebookRunRecord } from '../../src/shared/notebook'
 import { RendererFailureGate } from './renderer-failure-gate'
 import type { ConversationSkillImportApprovalRequest } from '../../src/shared/settings'
 import type { UpdateStatus } from '../../src/shared/update'
@@ -300,6 +303,13 @@ type BrandState = {
   title: string
   menus: string[]
 }
+type NativeMenuProbe = {
+  anchor: { x: number | undefined; y: number | undefined; zoom: number } | null
+  shown: boolean
+  closed: boolean
+  close: () => void
+  dispose: () => void
+}
 type ElectronApp = {
   captureBrandState: () => Promise<BrandState>
   restartWithBrandFixture: (
@@ -308,6 +318,7 @@ type ElectronApp = {
 
   readonly page: Page
   openAdditionalRenderer: () => Promise<Page>
+  readNotebookFixtureRuns: (projectId: string, sessionId: string) => Promise<NotebookRunRecord[]>
   authenticatedWebUrl: () => Promise<string>
   allowRendererConsoleError: (text: string) => void
   captureMainLog: (name: string) => Promise<string>
@@ -334,6 +345,7 @@ type ElectronApp = {
   findOverlayIsVisible: () => Promise<boolean>
   launchSecondInstance: () => Promise<Page>
   mainWindowState: () => Promise<{ minimized: boolean; visible: boolean }>
+  observeMainWindowMenuPopup: (offset: number) => Promise<JSHandle<NativeMenuProbe>>
   trustSourcePreviewCertificate: (certificate: string) => Promise<void>
   setDefaultSessionCookie: (url: string) => Promise<void>
   readClipboardText: () => Promise<string>
@@ -349,7 +361,10 @@ type ElectronApp = {
   restart: (options?: { resourceProfilePhase?: string }) => Promise<Page>
   restartAfterCrash: (options?: { force?: boolean }) => Promise<Page>
   restartWithCorruptHistoricalSessionFile: (projectId: string) => Promise<Page>
-  restartWithSessionFixture: (session: PersistedChatSession) => Promise<Page>
+  restartWithSessionFixture: (
+    session: PersistedChatSession,
+    notebookRuns?: NotebookRunRecord[]
+  ) => Promise<Page>
   sabotageDelegatedHandoffCleanup: (childName: string) => Promise<void>
   recordResourceTiming: (name: string, durationMs: number) => void
   captureResourceTimings: (prefix?: string) => Promise<void>
@@ -827,6 +842,16 @@ class ElectronAppHarness implements ElectronApp {
     return page
   }
 
+  async readNotebookFixtureRuns(
+    projectId: string,
+    sessionId: string
+  ): Promise<NotebookRunRecord[]> {
+    const dataRoot = await this.page.evaluate(
+      async () => (await window.api.storage.getInfo()).dataRoot
+    )
+    return new NotebookRunRepository(dataRoot).readSessionRuns(projectId, sessionId)
+  }
+
   async authenticatedWebUrl(): Promise<string> {
     const target = electronLaunchTarget(this.roots.userDataRoot)
     const child = spawn(
@@ -1014,6 +1039,39 @@ class ElectronAppHarness implements ElectronApp {
 
       return { minimized: mainWindow.isMinimized(), visible: mainWindow.isVisible() }
     })
+  }
+
+  async observeMainWindowMenuPopup(offset: number): Promise<JSHandle<NativeMenuProbe>> {
+    return this.runningApplication.evaluateHandle(({ BrowserWindow, Menu, screen }, nextOffset) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      const area = screen.getDisplayMatching(window.getBounds()).workArea
+      window.setPosition(area.x + nextOffset, area.y + nextOffset)
+      const original = Menu.prototype.popup
+      const probe: NativeMenuProbe = {
+        anchor: null,
+        shown: false,
+        closed: false,
+        close: () => undefined,
+        dispose: () => {
+          Menu.prototype.popup = original
+          probe.close()
+        }
+      }
+      Menu.prototype.popup = function (options = {}) {
+        Menu.prototype.popup = original
+        probe.anchor = { x: options.x, y: options.y, zoom: window.webContents.getZoomFactor() }
+        this.once('menu-will-show', () => {
+          probe.shown = true
+        })
+        this.once('menu-will-close', () => {
+          probe.closed = true
+        })
+        probe.close = () => this.closePopup(options.window)
+        // Observe the production call while still opening and closing a real native popup.
+        return original.call(this, options)
+      }
+      return probe
+    }, offset)
   }
 
   async auditSourceAttachments(): Promise<JSHandle<boolean[]>> {
@@ -1346,10 +1404,16 @@ class ElectronAppHarness implements ElectronApp {
     return this.page
   }
 
-  async restartWithSessionFixture(session: PersistedChatSession): Promise<Page> {
+  async restartWithSessionFixture(
+    session: PersistedChatSession,
+    notebookRuns: NotebookRunRecord[] = []
+  ): Promise<Page> {
     if (![session.projectId, session.id].every((id) => /^[a-zA-Z0-9_-]+$/.test(id))) {
       throw new Error('Invalid E2E Session fixture identity.')
     }
+    const dataRoot = notebookRuns.length
+      ? await this.page.evaluate(async () => (await window.api.storage.getInfo()).dataRoot)
+      : undefined
     await this.close()
     const directory = join(this.roots.storageRoot, 'sessions', session.projectId)
     await mkdir(directory, { recursive: true })
@@ -1357,6 +1421,28 @@ class ElectronAppHarness implements ElectronApp {
       join(directory, `${session.id}.json`),
       JSON.stringify(createSessionFile(session))
     )
+    if (dataRoot && notebookRuns.length) {
+      if (session.packageOrigin)
+        await mkdir(
+          join(dataRoot, 'artifacts', session.projectId, session.id, '.session-package'),
+          { recursive: true }
+        )
+      const repository = new NotebookRunRepository(dataRoot)
+      const lane = createRootNotebookLane(session.projectId, session.id, `root-frame-${session.id}`)
+      await repository.loadOrCreate({
+        projectId: session.projectId,
+        sessionId: session.id,
+        workspaceCwd: session.cwd,
+        lane
+      })
+      for (const run of notebookRuns)
+        await repository.appendRun({
+          projectId: session.projectId,
+          sessionId: session.id,
+          lane,
+          run
+        })
+    }
     // Rebuild the catalog from the fixture file, just as the historical-session fixture does.
     const client = createProjectDbClient(this.roots.storageRoot)
     try {
