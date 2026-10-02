@@ -22,6 +22,10 @@ import {
   type ChatSession
 } from '@/stores/session-store'
 import type { PersistedChatSession } from '../../../../shared/session-persistence'
+import {
+  reportWorkspaceOperationError,
+  useWorkspaceOperationErrors
+} from '@/lib/acp/workspace-operation-error'
 import { resetSessionPersistenceWriteFailuresForTests } from '@/lib/session-persistence/session-persistence'
 import type { ReviewWithChecks } from '../../../../shared/reviewer'
 import type { ActivePlanProjection } from '../../../../shared/session-plan/contract'
@@ -202,6 +206,7 @@ describe('WorkspacePage send gate while compacting', () => {
     })
     vi.clearAllMocks()
     runtime.actionError = null
+    useWorkspaceOperationErrors.setState({ errors: {} })
     runtime.promptInFlightSessionIds = []
     runtime.sendPreparationInFlightSessionIds = []
     runtime.nativeContextCompactionSessionIds = ['sess-a']
@@ -297,6 +302,27 @@ describe('WorkspacePage send gate while compacting', () => {
     }
   )
 
+  it('scopes operation errors to the active Session and reserves the global runtime error for no Session', async () => {
+    runtime.actionError = 'Runtime action failed elsewhere'
+    useSessionStore.setState({
+      sessions: [createSession(), createSession({ id: 'sess-b', title: 'sess-b' })]
+    })
+    await renderPage()
+    expect(conversationProps.view.actionError).toBeNull()
+
+    await act(async () => reportWorkspaceOperationError('sess-a', 'Session A operation failed'))
+    expect(conversationProps.view.actionError).toBe('Session A operation failed')
+
+    await act(async () => useSessionStore.setState({ selectedSessionId: 'sess-b' }))
+    expect(conversationProps.view.actionError).toBeNull()
+
+    await act(async () => useSessionStore.setState({ selectedSessionId: 'sess-a' }))
+    expect(conversationProps.view.actionError).toBe('Session A operation failed')
+
+    await act(async () => useSessionStore.setState({ selectedSessionId: undefined }))
+    expect(conversationProps.view.actionError).toBe('Runtime action failed elsewhere')
+  })
+
   it('saves the selected branch before stopping its Subagents', async () => {
     let releaseSave: (() => void) | undefined
     const saveSession = vi.fn(
@@ -375,11 +401,20 @@ describe('WorkspacePage send gate while compacting', () => {
     })
 
     await renderPage(['sess-a'])
+    expect(conversationProps.view.persistenceBlocked).toBe(true)
 
     await act(async () => {
       conversationProps.composer.actions.changeDoc(textDoc('continue growing'))
     })
     expect(conversationProps.conversation.availability.submit).toBe(false)
+  })
+
+  it('keeps unrelated conversations usable when another conversation exceeds its storage limit', async () => {
+    runtime.nativeContextCompactionSessionIds = []
+    await renderPage(['another-session'])
+    await act(async () => conversationProps.composer.actions.changeDoc(textDoc('Keep working')))
+    expect(conversationProps.view.persistenceBlocked).toBe(false)
+    expect(conversationProps.conversation.availability.submit).toBe(true)
   })
 
   it('defaults Memory off and explains the global gate when Memory is off in Settings', async () => {
@@ -465,7 +500,19 @@ describe('WorkspacePage send gate while compacting', () => {
                 updatedAt: 1
               }
             ],
-            messages: [],
+            messages: [
+              {
+                id: 'message-a',
+                role: 'user',
+                content: 'Original prompt',
+                status: 'complete',
+                eventIds: [],
+                agentFrameId: 'root',
+                introducedOnBranchId: 'branch-a',
+                createdAt: 1,
+                updatedAt: 1
+              }
+            ],
             activities: [],
             activityGroups: [],
             runtimeSegments: []
@@ -514,7 +561,19 @@ describe('WorkspacePage send gate while compacting', () => {
             updatedAt: 1
           }
         ],
-        messages: [],
+        messages: [
+          {
+            id: 'message-a',
+            role: 'user',
+            content: 'Original prompt',
+            status: 'complete',
+            eventIds: [],
+            agentFrameId: 'root',
+            introducedOnBranchId: 'branch-a',
+            createdAt: 1,
+            updatedAt: 1
+          }
+        ],
         activities: [],
         activityGroups: [],
         runtimeSegments: []
@@ -1254,7 +1313,7 @@ describe('WorkspacePage send gate while compacting', () => {
   })
 
   it('surfaces restored permission retry errors without replacing the authorization card', async () => {
-    runtime.actionError = 'Permission response failed'
+    reportWorkspaceOperationError('sess-a', 'Permission response failed')
     useSessionStore.setState((state) => ({
       sessions: state.sessions.map((session) => ({
         ...session,
@@ -1282,8 +1341,8 @@ describe('WorkspacePage send gate while compacting', () => {
 
     expect(conversationProps.view.actionError).toBe('Permission response failed')
 
-    runtime.actionError = null
     await act(async () => {
+      useWorkspaceOperationErrors.setState({ errors: {} })
       useSessionStore.getState().failRun('sess-a', 'Continuation failed')
       useSessionStore.getState().setPermissionPending('sess-a')
     })

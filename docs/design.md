@@ -291,6 +291,14 @@ colors communicate a successful or failed probe/migration result.
 | `--z-index-toast`         | `z-toast`         | `40`  | Background notices and undo snackbars below modal backdrops          |
 | `--z-index-markdown-menu` | `z-markdown-menu` | `200` | Streamdown Mermaid and table format menus above fullscreen content   |
 
+Shared `Dialog` and `AlertDialog` own modal stacking through `overlay-layer.ts`.
+Their root advances the inherited layer by 20 (the first modal is 60); Select,
+DropdownMenu, Popover and Tooltip use the intermediate +10 layer. React context
+survives portals, so a child confirmation or menu remains above its owning modal.
+Expanded workbench previews provide the same scope without remounting their content.
+Use these shared primitives instead of importing Radix dialogs directly or adding
+surface-specific z-index overrides. Existing standalone floating styles remain unchanged.
+
 Background notices share `z-toast`: action toasts, the notification stack, persistent storage
 recovery alerts, live message notices and their error fallback. Modal backdrops must cover these
 notices while the background is blocked. Inline errors stay within their owning surface. Preserve
@@ -414,11 +422,13 @@ Active-dialog menus and other foreground child layers retain their own ordering.
 
 ### PDF reading and annotations
 
-- Original PDF, Figures & Tables, and Notes & Annotations use distinct leading document, image, and notebook icons with visible labels.
+- Original PDF, Figures & Tables, and Notes & Annotations use distinct leading document, image, and notebook icons with visible labels. Figures & Tables also accepts finalized upload/artifact PDF versions independently of Literature membership, Agent context, or annotation write access. Opening Figures & Tables restores cached results only. New analysis requires an explicit Analyze PDF or Download and continue action; uploading, opening a preview, and switching tabs never start analysis. Cancellation does not automatically restart analysis.
 - Parsed PDF tables in Figures & Tables preserve source row/column spans, use a collapsed border on every cell, and share one neutral theme surface without inferring headers from the first row or merged cells. Text and numbers use the same start alignment, with tabular digits and numeric no-wrap retained. Only the hovered cell is tinted, including when it spans multiple rows; row-spanning content stays vertically centered. Minimum widths apply uniformly because the first DOM cell below a rowspan may belong to a later column. These rules also apply to cached tables and do not change source text or exports.
 - Empty Notes shows a short explanation and a return-to-PDF action; an unavailable source shows a status instead of an empty panel.
 - Literature annotations belong to the exact PDF attachment version and appear in both Library and project previews. Upload/artifact annotations remain conversation-scoped. Both use the shared tag catalog.
 - Active text marking uses the I-beam cursor across the document; area selection uses a crosshair, and comment buttons retain a pointer. Escape dismisses the inner popup or exits the active tool before closing a containing preview dialog.
+- PDF navigation uses the same 1120px reader-width breakpoint as Notes: docked on wide readers and floating at the left edge on narrow readers, including resized dialogs. Floating navigation does not shrink the PDF, has no backdrop or focus trap, leaves at least 16px on the right, and hides its resize handle. Escape or Close dismisses it and returns focus to the PDF. When both sidebars float, Escape closes Notes if focus is within Notes or its toggle; otherwise it closes navigation first. Resizing preserves its selected mode and preferred docked width. When no readable native outline is available, Outline is visibly disabled with `aria-disabled`, guarded activation, and a reason tooltip on hover or keyboard focus; Pages remains usable.
+- Notes docks beside the PDF when the reader is at least 1120px wide, including the full preview dialog at the default application size. In narrower readers (including a modal after shrinking the application) it floats at the right edge without shrinking the PDF, with no backdrop or focus trap; its width is capped to leave a 16px left margin. Floating notes retain Close and full-view actions, hide the resize handle, and consume Escape after nested controls. Resizing preserves drafts and the preferred docked width.
 - Notes uses shared selects, inputs, tags, and annotation colors. Only the explicit source action navigates to the PDF; clicking the card does not. The source action preserves the draft when returning from the PDF. Filters retain the edited card until Save or Cancel.
 - Search and filters start collapsed. The action toolbar stays on one row at narrow widths by hiding optional labels. Page and mark type lead each card; provenance is secondary, quotes have a line limit, and tags stay within one row with overflow access and removal on hover or keyboard focus.
 - Import progress includes a loading indicator, cancellation, and unsupported-type counts. A durable import receipt prevents deleted native annotations from returning on reopen; preview and export replace only the original objects listed in that receipt, retaining unsupported objects.
@@ -653,6 +663,13 @@ The upper-right pin toggles the current Session through the shared Session contr
 
 ### Activity Stream
 
+- Message tool cards use compact, flat surfaces: `rounded-lg border border-border-200 bg-bg-000`,
+  10px horizontal insets, 8px section gaps, and 28px icon tiles with 16px glyphs. Literature cards
+  use 10px padding; structured Notebook/Artifact summaries use 8px vertical section padding.
+  Keep document counts in the header metadata row instead of a separate footer. Use 13px
+  medium-weight titles, readable metadata, wrapping badges and small action buttons;
+  preserve all sources, warnings, approval details and existing disclosures.
+
 - Notebook tool details use compact summary cards for runtime discovery, runtime binding/switching, restart,
   and state inspection; Artifact writes show file name, type and size without loading file bytes.
   Keep the existing tool-row disclosure and put raw Notebook input/output behind collapsed detail
@@ -818,6 +835,15 @@ The upper-right pin toggles the current Session through the shared Session contr
 - Toolbar action buttons are `h-8 w-8`; send uses `bg-primary text-primary-foreground hover:bg-primary/80`, cancel uses `bg-bg-200 text-text-000 hover:bg-bg-300`.
 - Read-only state: apply `opacity-50` to the input content and action area as a whole, but do not shrink the layout.
 - Drag-and-drop state: use `ring-ring/50`, `border-ring/50`, or a semantic success token. Do not hardcode a new green.
+- Native files can be dropped anywhere in the central conversation (header, transcript, empty
+  space, or composer), excluding the left navigation, right preview, and portal dialogs. Use one
+  bounded overlay with neutral attachment/package wording because native hover events may hide
+  filenames. Ordinary files use the existing composer intake and remain draft attachments until
+  submission; one `.science` package opens the existing Project import flow. Reject mixed package
+  batches without partially attaching or importing. Respect blocked composer and Project availability.
+- Keep the new-Session `.science` import guide and keyboard-accessible picker visible at rest.
+  Ordinary file drags must not highlight that package-only guide. Clear hover feedback on leave,
+  drop, cancellation, or window blur.
 
 ### Resource Viewer / File Library
 
@@ -1169,6 +1195,13 @@ intentional exceptions and validation. Cross-panel Settings write failures use a
 notice above the scroll area. Global action feedback uses the top-center stack; background Notebook and recovery notices share the bottom-right stack.
 Local-file failures and Literature undo stay inside their owning content region.
 
+Restrict only the feature or region made unavailable by a failure; use application-wide blocking only
+when the application cannot operate safely. All floating background errors offer dismissal without
+clearing their underlying failure or safety gates. Keep recovery available in the owning surface:
+Session-load failures in Settings / Archived, size limits beside the affected conversation composer,
+and Notebook status/setup failures in Settings / Runtimes. Environment diagnostics start collapsed,
+outside the live summary; Retry shows pending feedback and never disables Close.
+
 Settings region warnings and operation failures, including preference saves, app-icon previews, logs, credentials, connection tests and storage scans, use the shared Notice surface. Keep retry, dismiss and diagnostics inside the owning notice when present, and keep the language rollback explanation available to screen readers. Input-linked validation stays beside its input using fieldErrorClassName (12px text, 20px line height, destructive text color and safe word wrapping), preserving ids and aria-describedby. Do not ellipsize embedded messages. Dense resource-row status labels, validation counters and destructive actions retain their existing compact presentation.
 
 Use the shared `ErrorNotice` for error summaries. The default is a compact inline surface across
@@ -1252,6 +1285,21 @@ alert region excludes the diagnostic payload so opening it does not announce the
 | File library      | Grid/list switch                                     | `ToggleGroup type="single"`; hover `bg-muted`, selected `bg-bg-400`                      |
 | File library      | File card / file row                                 | `Card` / button row + neutral hover `bg-bg-100` / `bg-bg-200`                            |
 
+## Windows application menu row
+
+Windows desktop main windows place File, Edit, View and Help next to the Open-Science brand in a
+36px title-bar row. Electron `titleBarOverlay` retains native caption controls, window resizing and
+system window behavior. Reserve those controls with the `titlebar-area-*` CSS environment variables;
+only the menu buttons use `app-region: no-drag`, leaving the rest of the row draggable. Native popups
+preserve the editing target and use the existing command owners for settings, search, interface scale,
+close and quit. Alt/F10 focus the menu row; arrows move between menus and open them; Escape returns
+focus to the previous control. Scale and theme changes synchronize the native overlay from the existing
+renderer preferences and color tokens. Account for the row in full-height application layouts.
+Native fullscreen hides the row and removes its layout offset; leaving fullscreen restores both.
+Fullscreen state comes from the native window, including a fresh snapshot after renderer reload;
+Alt/F10 menu entry is inactive while the row is hidden. This state is not persisted.
+macOS and Linux keep their existing native window/menu presentation, and Web clients add no desktop row.
+
 ## Language Guidelines
 
 - Product naming is consistently `Open-Science` in visible app surfaces such as window titles, sidebars, app menus, about information, and help entry points.
@@ -1264,6 +1312,7 @@ alert region excludes the diagnostic payload so opening it does not announce the
 
 ### Hover content and numeric stability
 
+- Usage's **Daily token usage** chart owns one continuous inspection tooltip. Full-height date columns, including zero days and gaps, select immediately with matching values and highlight; bar geometry stays fixed. Pointer-driven tooltip movement alone eases over 120ms, without replaying entry scaling. First opening, keyboard/touch selection and reduced motion position immediately. The surface stays readable while hovered, supports Escape and outside dismissal, fits the viewport, and closes on scroll, resize or panel exit. This chart-only moving information preview does not change ordinary Tooltip timing or the heatmap.
 - Mount one TooltipProvider per coherent toolbar, list, or action group. Ordinary button hints inherit the shared 200ms delay; subsequent hints within a 300ms skip window open immediately. Do not add local timing overrides for ordinary controls. Do not mount a new provider for every adjacent icon. Reusable Home header controls opt out of their standalone provider so the whole row shares hover intent, including the GitHub badge, message bell, network status and update action. Keep explicit longer explanatory delays and immediate chart inspection separate.
 - Text hints remain hoverable, dismissible with Escape, and bounded by the viewport. Long content gets internal scrolling. Preserve primary reference, attachment, and run-jump clicks.
 - CSL examples use a focusable preview button and a non-modal Popover: hover/focus discovers, click/tap pins, Escape/outside interaction dismisses, and internal scrolling preserves the panel. Show the complete style title, lazy-load and deduplicate per style, retain cached examples, and offer Retry after failure. The formatter's plain-text contract and content-addressed style identities stay unchanged.
